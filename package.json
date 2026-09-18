@@ -38,7 +38,7 @@
     "node": ">=22"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "typescript": "^5.7.0"
   },
   "author": "Jamarr Mayes",
   "repository": {

@@ -1,7 +1,7 @@
 {
   "name": "spendbrake",
   "version": "0.1.0",
-  "description": "Four enforcement gates for running LLM agents in production: spend ceiling, human release, disclosure guards, retraction.",
+  "description": "Enforcement gates for running LLM agents in production: spend ceiling, reservation, loop breaker, human release, disclosure guards, retraction.",
   "type": "module",
   "license": "MIT",
   "main": "./dist/index.js",

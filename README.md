@@ -1,6 +1,6 @@
 # spendbrake
 
-Four gates for running LLM agents in production without hoping they behave.
+Gates for running LLM agents in production without hoping they behave.
 
 > Formerly `agent-control-plane`. Old links redirect here.
 
@@ -27,7 +27,7 @@ A cap that cannot accrue and cannot trip is a decorative number. The gates in th
 are the corrected versions: pure decision functions with an explicit blocked state, plus the
 storage contract needed to make them binding.
 
-## The four gates
+## The gates
 
 | Gate | Prevents | Failure posture |
 |---|---|---|
@@ -35,6 +35,8 @@ storage contract needed to make them binding.
 | `approval` | Machine-generated content from reaching the public without a human release | Fails closed |
 | `disclosure` | Content publishing without required disclosures | Fails closed |
 | `retraction` | A published item from staying live once flagged | N/A — always permits removal |
+| `reservation` | Concurrent calls from collectively overshooting the cap before any of them is recorded | Fails closed |
+| `loop` | An agent loop from running without end, by step count or by repeating the same action | Fails closed |
 
 ### 1. Budget gate
 
@@ -113,6 +115,50 @@ One status flag takes a published item down everywhere, with no redeploy. This i
 people skip, and it is the one that matters when something goes wrong at 2am. If your
 rollback path is a deploy, you do not have a rollback path.
 
+### 5. Reservation gate
+
+The budget gate compares spend that has already been recorded against the cap. Calls that are
+still in flight have not been recorded yet, so ten concurrent calls can each read "under the
+cap" and together overshoot it. The sticky kill switch stops the call *after* the overshoot. A
+reservation stops the overshoot: each call holds its worst-case cost against the cap before it
+runs, and every outstanding hold counts against the cap for everyone else.
+
+```ts
+import { estimateMaxCostUsd, evaluateReservation, settleReservation } from "spendbrake";
+
+const worst = estimateMaxCostUsd("llama-3.3-70b", promptTokens, maxOutputTokens);
+const d = evaluateReservation({ spentUsd: 0.1, reservedUsd: 0.2, capUsd: 0.32 }, worst);
+// → { allowed: false, reason: "would_exceed_cap", ... }  spend alone was under the cap
+
+// After the call, release the hold and record what it really cost:
+const s = settleReservation({ reservedUsd, holdUsd: d.reserveUsd, actualUsd });
+// → { reservedUsd, accrueUsd, overrun }  overrun = the call beat its worst case
+```
+
+A call with no output limit has no worst case, so `estimateMaxCostUsd` returns `Infinity` and the
+gate refuses it. An estimate that is `NaN`, negative or missing is refused, not treated as zero.
+
+### 6. Loop breaker
+
+A pipeline with no terminal condition, no step counter and no per-agent cap can loop for days
+while every individual step looks fine, so nothing ever errors. This gate is the step counter and
+a no-progress detector.
+
+```ts
+import { evaluateLoop } from "spendbrake";
+
+evaluateLoop({ iteration: 25, maxIterations: 25 });
+// → { allowed: false, reason: "max_iterations", ... }
+
+evaluateLoop({ iteration: 4, recentActions: ["search:a", "verify:r1", "verify:r1", "verify:r1"] });
+// → { allowed: false, reason: "no_progress", repeatCount: 3, ... }
+```
+
+You choose the action fingerprint, for example `${tool}:${hash(args)}`. A missing or non-positive
+limit falls back to 25, never to unlimited. A corrupt counter (`NaN`, missing) blocks rather than
+reading as zero, because resetting a runaway loop's counter by accident is the failure this exists
+to prevent.
+
 ---
 
 ## Failure posture: the decision you have to make consciously
@@ -177,7 +223,7 @@ length of your TTL, which is exactly the window in which spend is running hottes
 
 - Not a prompt firewall, jailbreak filter, or content classifier.
 - Not an eval harness.
-- Not a policy engine with a rules DSL. Four gates, plain functions.
+- Not a policy engine with a rules DSL. A handful of gates, plain functions.
 - Not a substitute for your provider's own spend limits. Set those too — and make sure the
   cheaper of the two ceilings is the one that binds. Mine did not for a while: a $5/day cap
   permitted roughly $150/month against a $10/month provider limit, which made the local gate

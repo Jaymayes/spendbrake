@@ -91,6 +91,22 @@ test("an unbounded output budget cannot be estimated, so it cannot be reserved",
   }
 });
 
+test("a model with no price cannot be bounded, so it cannot be reserved", () => {
+  // Pricing an unknown model at a guessed rate, or at zero, is the fail-open path: the reservation
+  // looks bounded and is not. An unpriceable call is refused instead.
+  assert.equal(estimateMaxCostUsd("some-new-model-9", 100, 100), Number.POSITIVE_INFINITY);
+  assert.equal(estimateMaxCostUsd("", 100, 100), Number.POSITIVE_INFINITY);
+  assert.equal(estimateMaxCostUsd(undefined as unknown as string, 100, 100), Number.POSITIVE_INFINITY);
+  assert.equal(estimateMaxCostUsd("custom-a", 100, 100, { "custom-a": 0 }), Number.POSITIVE_INFINITY);
+  assert.equal(estimateMaxCostUsd("custom-a", 100, 100, { "custom-a": Number.NaN }), Number.POSITIVE_INFINITY);
+  assert.ok(Math.abs(estimateMaxCostUsd("custom-a", 500, 500, { "custom-a": 0.002 }) - 0.002) < 1e-12);
+  const d = evaluateReservation(
+    { spentUsd: 0, reservedUsd: 0, capUsd: 100 },
+    estimateMaxCostUsd("some-new-model-9", 1, 1),
+  );
+  assert.equal(d.reason, "invalid_estimate");
+});
+
 test("zero-cost models reserve nothing", () => {
   assert.equal(estimateMaxCostUsd("@cf/meta/llama-3.1-8b-instruct", 5000, 5000), 0);
 });
@@ -105,6 +121,26 @@ test("settling releases the hold, accrues the actual cost, and flags an overrun"
   assert.equal(over.reservedUsd, 0);
   assert.equal(over.accrueUsd, 0.25, "the real cost is always accrued, even when it beat the estimate");
   assert.equal(over.overrun, true);
+});
+
+test("an actual cost that cannot be read settles at the hold, never at zero", () => {
+  // Accruing 0 for an unparseable usage record would refund the whole hold for a call that ran.
+  const unreadable = [Number.NaN, undefined, null, -1, Number.POSITIVE_INFINITY] as unknown as number[];
+  for (const actualUsd of unreadable) {
+    const s = settleReservation({ reservedUsd: 0.3, holdUsd: 0.1, actualUsd });
+    assert.equal(s.accrueUsd, 0.1, `actual ${String(actualUsd)} must accrue the hold`);
+    assert.equal(s.actualUnknown, true);
+    assert.equal(s.overrun, false);
+    assert.ok(Math.abs(s.reservedUsd - 0.2) < 1e-12);
+  }
+  assert.equal(settleReservation({ reservedUsd: 0.1, holdUsd: 0.1, actualUsd: 0.02 }).actualUnknown, false);
+});
+
+test("an expired reservation settles as spent, not refunded", () => {
+  // A timed-out call may still have billed. Expiry is settlement with an unknown actual.
+  const s = settleReservation({ reservedUsd: 0.1, holdUsd: 0.1, actualUsd: null });
+  assert.equal(s.accrueUsd, 0.1);
+  assert.equal(s.reservedUsd, 0);
 });
 
 test("settling never drives outstanding reservations negative", () => {
@@ -155,14 +191,41 @@ test("the same action repeated back to back is treated as no progress", () => {
   assert.equal(d.repeatCount, DEFAULT_MAX_IDENTICAL_REPEATS);
 });
 
-test("repeats that are interleaved with other actions are not no-progress", () => {
+test("repeats interleaved with varied work are progress, not a loop", () => {
+  const d = evaluateLoop({
+    iteration: 5,
+    maxIterations: 50,
+    recentActions: ["search:q=a", "verify:r1", "search:q=b", "verify:r2", "summarize:r2"],
+  });
+  assert.equal(d.allowed, true);
+  assert.equal(d.repeatCount, 1);
+});
+
+test("two agents handing the same work back and forth is a loop — the ping-pong case", () => {
+  // The shape of the $47K Analyzer <-> Verifier incident: no single action repeats back to back,
+  // so a consecutive-repeat detector alone never fires.
+  const d = evaluateLoop({
+    iteration: 6,
+    maxIterations: 50,
+    recentActions: ["analyze:r1", "verify:r1", "analyze:r1", "verify:r1", "analyze:r1", "verify:r1"],
+  });
+  assert.equal(d.allowed, false);
+  assert.equal(d.reason, "oscillation");
+  assert.equal(d.repeatCount, 1);
+});
+
+test("an alternation shorter than the threshold is still allowed", () => {
   const d = evaluateLoop({
     iteration: 5,
     maxIterations: 50,
     recentActions: ["verify:r1", "analyze:r1", "verify:r1", "analyze:r1", "verify:r1"],
   });
-  assert.equal(d.allowed, true);
-  assert.equal(d.repeatCount, 1);
+  assert.equal(d.allowed, true, "2.5 round trips is under the default of 3");
+});
+
+test("the oscillation threshold follows maxIdenticalRepeats", () => {
+  const d = evaluateLoop({ iteration: 4, maxIterations: 50, recentActions: ["a", "b", "a", "b"], maxIdenticalRepeats: 2 });
+  assert.equal(d.reason, "oscillation");
 });
 
 test("the repeat threshold is configurable and a non-positive one falls back to the default", () => {

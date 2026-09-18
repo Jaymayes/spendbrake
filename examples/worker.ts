@@ -1,6 +1,6 @@
 // Reference wiring on Cloudflare Workers + D1 + KV.
-// Shows the two things the pure functions cannot do for you: read/write the spend window
-// atomically, and invalidate the cached decision on accrual.
+// Shows the things the pure functions cannot do for you: read/write the spend window atomically,
+// invalidate the cached decision on accrual, and hold/settle/expire reservations in D1 batches.
 
 import {
   DEFAULT_HARD_CAP_USD,
@@ -8,7 +8,10 @@ import {
   evaluateBudget,
   evaluateBudgetOnStoreError,
   checkDisclosures,
+  estimateMaxCostUsd,
   evaluateRelease,
+  RESERVATION_SQL,
+  settleReservation,
 } from "spendbrake";
 
 interface Env {
@@ -76,6 +79,60 @@ export async function budgetAccrue(env: Env, model: string, tokens: number) {
   // Invalidate on accrual, not just on TTL. Otherwise a tripped switch stays invisible for
   // the length of the TTL — exactly the window in which spend is running hottest.
   await env.CACHE?.delete(CACHE_KEY).catch(() => {});
+}
+
+// ── Reservations ────────────────────────────────────────────────────────────
+// With concurrent calls, use these instead of budgetGate + budgetAccrue. The reserve statement is
+// the gate: it counts every open hold against the cap inside one atomic statement, so there is no
+// read-then-write window and nothing to cache.
+
+const HOLD_TTL_MS = 5 * 60_000;
+
+/** Hold a call's worst case before making it. Returns the hold, or null when refused. */
+export async function reserveCall(
+  env: Env,
+  id: string,
+  model: string,
+  promptTokens: number,
+  maxOutputTokens: number,
+): Promise<{ id: string; holdUsd: number } | null> {
+  const holdUsd = estimateMaxCostUsd(model, promptTokens, maxOutputTokens);
+  // Unpriceable model or unbounded output: Infinity. Refuse without touching storage.
+  if (!Number.isFinite(holdUsd)) return null;
+
+  const [, reserved] = await env.DB.batch([
+    env.DB.prepare(RESERVATION_SQL.ensureWindow).bind(windowKey(), DEFAULT_HARD_CAP_USD),
+    env.DB.prepare(RESERVATION_SQL.reserve).bind(id, windowKey(), holdUsd, Date.now() + HOLD_TTL_MS),
+  ]);
+  return reserved.meta.changes === 1 ? { id, holdUsd } : null;
+}
+
+/**
+ * Settle after the call. Pass the provider-reported cost, or null if it could not be read — the
+ * hold is then charged, never zero. Safe to retry: a second settle for the same id changes nothing.
+ */
+export async function settleCall(env: Env, hold: { id: string; holdUsd: number }, actualUsd: number | null) {
+  const s = settleReservation({ reservedUsd: 0, holdUsd: hold.holdUsd, actualUsd });
+  if (s.overrun) console.warn("[control-plane] call cost more than its worst case:", hold.id);
+  await env.DB.batch([
+    env.DB.prepare(RESERVATION_SQL.accrueSettled).bind(hold.id, s.accrueUsd),
+    env.DB.prepare(RESERVATION_SQL.markSettled).bind(hold.id, s.actualUnknown ? null : s.accrueUsd),
+  ]);
+  await env.CACHE?.delete(CACHE_KEY).catch(() => {});
+}
+
+/** Cron: charge holds whose call never settled (crash, timeout). Charged, not refunded. */
+export async function expireStaleHolds(env: Env) {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(RESERVATION_SQL.expireAccrue).bind(now),
+    env.DB.prepare(RESERVATION_SQL.expireMark).bind(now),
+  ]);
+  await env.CACHE?.delete(CACHE_KEY).catch(() => {});
+}
+
+function windowKey(): string {
+  return new Date().toISOString().slice(0, 10); // matches strftime('%Y-%m-%d','now') in UTC
 }
 
 /** Publication path: disclosures, then human release. Both fail closed. */

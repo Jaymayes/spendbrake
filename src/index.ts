@@ -22,6 +22,7 @@ export type {
 } from "./approval-gate.ts";
 
 export { estimateMaxCostUsd, evaluateReservation, settleReservation } from "./reservation-gate.ts";
+export { RESERVATION_SQL } from "./reservation-sql.ts";
 export type {
   ReservationDecision,
   ReservationReason,

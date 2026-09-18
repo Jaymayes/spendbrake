@@ -4,11 +4,25 @@ Gates for running LLM agents in production without hoping they behave.
 
 > Formerly `agent-control-plane`. Old links redirect here.
 
-Extracted from a governed autonomous content system that has been running on Cloudflare
-Workers since 2025. Every gate here is enforcement, not telemetry — each one has an
+The first four gates were extracted from a governed autonomous content system that has been
+running on Cloudflare Workers since 2025; the reservation and loop gates are newer (see
+[Status](#status)). Every gate here is enforcement, not telemetry — each one has an
 `allowed: false` path that stops the thing from happening.
 
 MIT licensed. No dependencies. Works on Workers, Node, Deno, or Bun.
+
+## Try it
+
+Not on npm yet. From a clone:
+
+```sh
+git clone https://github.com/Jaymayes/spendbrake && cd spendbrake
+npm test        # runs the TypeScript tests directly; needs Node 22.18+ — no install step
+npm i && npm run build   # emits dist/; the `import ... from "spendbrake"` examples below resolve to it
+```
+
+The storage tests run the reference SQL against real SQLite (`node:sqlite`), so no database or
+account is needed.
 
 ---
 
@@ -36,7 +50,7 @@ storage contract needed to make them binding.
 | `disclosure` | Content publishing without required disclosures | Fails closed |
 | `retraction` | A published item from staying live once flagged | N/A — always permits removal |
 | `reservation` | Concurrent calls from collectively overshooting the cap before any of them is recorded | Fails closed |
-| `loop` | An agent loop from running without end, by step count or by repeating the same action | Fails closed |
+| `loop` | An agent loop from running without end: by step count, by repeating one action, or by two agents handing work back and forth | Fails closed |
 
 ### 1. Budget gate
 
@@ -135,14 +149,29 @@ const s = settleReservation({ reservedUsd, holdUsd: d.reserveUsd, actualUsd });
 // → { reservedUsd, accrueUsd, overrun }  overrun = the call beat its worst case
 ```
 
-A call with no output limit has no worst case, so `estimateMaxCostUsd` returns `Infinity` and the
-gate refuses it. An estimate that is `NaN`, negative or missing is refused, not treated as zero.
+Every way of not knowing the cost fails closed:
+
+- **No output limit, or a model with no price in the table** — there is no worst case, so
+  `estimateMaxCostUsd` returns `Infinity` and the gate refuses the call. It does not guess a rate,
+  and it does not read "no price" as free. Price the worst case at the rate your provider will
+  actually bill for that request, including long-context tiers.
+- **An estimate that is `NaN`, negative or missing** — refused, not treated as zero.
+- **An actual cost that cannot be read** — settlement charges the hold, never zero, and says so
+  (`actualUnknown: true`). A zero there would refund the whole hold for a call that ran.
+- **A hold that never settles** (crash, timeout) — it expires *as spent*. Ledger escrow refunds an
+  expired hold; this does not, because a call that timed out on your side may still have billed
+  on the provider's.
+
+The pure functions decide; storage has to enforce. The concurrency guarantee only holds if the
+check and the hold are one atomic step, so the package ships the SQL too — see
+[Storage contract](#storage-contract).
 
 ### 6. Loop breaker
 
 A pipeline with no terminal condition, no step counter and no per-agent cap can loop for days
-while every individual step looks fine, so nothing ever errors. This gate is the step counter and
-a no-progress detector.
+while every individual step looks fine, so nothing ever errors. This gate is the step counter, a
+no-progress detector, and an oscillation detector for the two-agent ping-pong — one agent asks for
+more work, the other obliges — where no single action ever repeats back to back.
 
 ```ts
 import { evaluateLoop } from "spendbrake";
@@ -152,6 +181,9 @@ evaluateLoop({ iteration: 25, maxIterations: 25 });
 
 evaluateLoop({ iteration: 4, recentActions: ["search:a", "verify:r1", "verify:r1", "verify:r1"] });
 // → { allowed: false, reason: "no_progress", repeatCount: 3, ... }
+
+evaluateLoop({ iteration: 6, recentActions: ["analyze:r1", "verify:r1", "analyze:r1", "verify:r1", "analyze:r1", "verify:r1"] });
+// → { allowed: false, reason: "oscillation", ... }
 ```
 
 You choose the action fingerprint, for example `${tool}:${hash(args)}`. A missing or non-positive
@@ -204,7 +236,7 @@ and error strings, where nothing forces them to stay true.
 ## Storage contract
 
 The gates are pure. You supply the state. `schema.sql` has a reference D1/SQLite schema —
-one table for the spend window, one for the approval queue.
+a spend window, its open reservations, and an approval queue.
 
 The spend row must be updated atomically. The reference upsert flips the sticky switch in the
 same statement that accrues the cost, so a concurrent write cannot slip past the boundary:
@@ -216,6 +248,22 @@ kill_switch_hit = CASE WHEN total_spend_usd + ?1 >= hard_cap_usd THEN 1 ELSE kil
 If you cache the gate decision (recommended — this runs on every inference), **invalidate the
 cache on accrual**, not just on TTL expiry. Otherwise the tripped state is invisible for the
 length of your TTL, which is exactly the window in which spend is running hottest.
+
+Reservations need more than one row, and D1 has no interactive `BEGIN`/`COMMIT`, so a JavaScript
+read-then-write cannot make them safe. `RESERVATION_SQL` exports the statements as plain strings
+(no driver dependency). The admission check is a single guarded `INSERT ... SELECT ... WHERE`:
+
+```sql
+WHERE w.kill_switch_hit = 0
+  AND w.total_spend_usd < w.hard_cap_usd
+  AND w.total_spend_usd + (open holds for the window) + ?3 <= w.hard_cap_usd + 1e-9
+```
+
+Zero rows inserted means refused. Settle and expire each run as one D1 batch, and both match only
+open reservations, so a retried settle is a no-op. `examples/worker.ts` wires `reserveCall`,
+`settleCall` and a cron `expireStaleHolds`. `test/storage-contract.test.ts` runs these exact
+strings against SQLite, including a seeded property test that no interleaving of reserves and
+settles puts spend plus open holds over the cap.
 
 ---
 
@@ -229,10 +277,34 @@ length of your TTL, which is exactly the window in which spend is running hottes
   permitted roughly $150/month against a $10/month provider limit, which made the local gate
   non-binding in every month it mattered.
 
+## Prior art
+
+None of these ideas are new here, and the reservation and loop gates lean on others' work:
+
+- **Pre-call budget reservation** ships on by default in the
+  [LiteLLM proxy](https://docs.litellm.ai/docs/proxy/users), which reserves before the call and
+  replaces the hold with the priced cost afterwards. Its open issue
+  [#35524](https://github.com/BerriAI/litellm/issues/35524) — reservation skipped when a request
+  cannot be priced — is the fail-open case this package refuses by design.
+- **Two-phase reserve/commit** is standard ledger practice; see TigerBeetle's
+  [two-phase transfers](https://docs.tigerbeetle.com/coding/two-phase-transfers/). spendbrake
+  departs from it on one point, deliberately: an expired hold is charged, not refunded.
+- **Composable termination conditions** for agent loops are in AutoGen's termination API (AutoGen
+  is now in maintenance mode; Microsoft points new work to Microsoft Agent Framework).
+- **Budget-overrun incidents** are catalogued in *Token Budgets: An Empirical Catalog of 63
+  LLM-Agent Budget-Overrun Incidents* ([arXiv:2606.04056](https://arxiv.org/abs/2606.04056)).
+  It did not study this package.
+
+What this package adds is narrow: pure decision functions with no dependencies, a fail-closed
+answer to every "cost unknown" case, and SQL that is tested rather than described.
+
 ## Status
 
-v0. Extracted from a running system, generalized, and re-tested in isolation. The originals
-are in production; these versions are not yet, which is the honest distinction.
+v0. The budget, approval, disclosure and retraction gates were extracted from a running system,
+generalized, and re-tested in isolation. The originals are in production; these versions are not
+yet, which is the honest distinction. The reservation and loop gates were written for this package
+afterwards, from the failures described above and in the prior art. They have tests, including the
+storage SQL, but they have not run in production anywhere.
 
 ## Field notes
 

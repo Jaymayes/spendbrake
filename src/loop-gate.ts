@@ -6,13 +6,16 @@
 // and no per-agent cap, where one agent keeps asking for "more analysis" and another keeps obliging.
 // Nothing in the loop is wrong step by step, so nothing errors; it simply never ends.
 //
-// Two independent brakes:
+// Three independent brakes:
 //   1. max_iterations — a hard step count. Missing or non-positive limits fall back to the default,
 //      never to unlimited. A corrupt counter (NaN, infinite, missing) fails CLOSED: resetting a
 //      runaway loop's counter to zero by accident is exactly the failure this exists to prevent.
 //   2. no_progress — the same action fingerprint repeated back to back N times. The caller chooses
 //      the fingerprint (e.g. `${tool}:${stableHash(args)}`); identical consecutive fingerprints mean
 //      the loop is spending without changing anything.
+//   3. oscillation — two actions alternating A, B, A, B for N full round trips. This is the
+//      two-agent ping-pong ("analyze" asks for more, "verify" obliges): no action repeats back to
+//      back, so brake 2 never fires on it. The threshold is the same N as brake 2.
 
 export const DEFAULT_MAX_ITERATIONS = 25;
 export const DEFAULT_MAX_IDENTICAL_REPEATS = 3;
@@ -27,7 +30,7 @@ export interface LoopState {
   maxIdenticalRepeats?: number;
 }
 
-export type LoopReason = "ok" | "max_iterations" | "no_progress";
+export type LoopReason = "ok" | "max_iterations" | "no_progress" | "oscillation";
 
 export interface LoopDecision {
   allowed: boolean;
@@ -51,6 +54,16 @@ function trailingRepeats(actions: readonly string[] | undefined): number {
   return count;
 }
 
+/** Full A,B round trips at the tail of the history, where A !== B. [x,a,b,a,b] → 2. */
+function trailingRoundTrips(actions: readonly string[] | undefined): number {
+  if (!actions || actions.length < 2) return 0;
+  const n = actions.length;
+  if (actions[n - 1] === actions[n - 2]) return 0;
+  let run = 2;
+  while (run < n && actions[n - 1 - run] === actions[n - 1 - run + 2]) run++;
+  return Math.floor(run / 2);
+}
+
 /** Decide whether the agent may take one more step. */
 export function evaluateLoop(s: LoopState): LoopDecision {
   const maxIterations = positiveIntOr(s.maxIterations, DEFAULT_MAX_ITERATIONS);
@@ -68,6 +81,9 @@ export function evaluateLoop(s: LoopState): LoopDecision {
   }
   if (repeatCount >= maxRepeats) {
     return { allowed: false, reason: "no_progress", iteration, maxIterations, repeatCount };
+  }
+  if (trailingRoundTrips(s.recentActions) >= maxRepeats) {
+    return { allowed: false, reason: "oscillation", iteration, maxIterations, repeatCount };
   }
   return { allowed: true, reason: "ok", iteration, maxIterations, repeatCount };
 }

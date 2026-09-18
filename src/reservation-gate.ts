@@ -14,11 +14,16 @@
 //   2. Negative counters are clamped to zero — a corrupt value must not buy headroom.
 //   3. A non-positive cap falls back to DEFAULT_HARD_CAP_USD, never to unlimited (same rule as the
 //      budget gate).
-//   4. Settlement always accrues the REAL cost, even when it beat the estimate, and says so.
+//   4. Settlement accrues the REAL cost, even when it beat the estimate, and says so. When the real
+//      cost cannot be read, it accrues the HOLD, never zero: a zero would refund a call that ran.
+//   5. A model with no usable price has no worst case, so it cannot be reserved. Guessing a rate, or
+//      reading "no price" as free, is the fail-open path this gate exists to close.
+//   6. Expiry is settlement with an unknown actual. Unlike ledger escrow, an expired hold is charged,
+//      not refunded, because a call that timed out on your side may still have billed on theirs.
 
 // `.ts` extensions so the source runs directly under Node's type stripping (as the tests do);
 // tsconfig's rewriteRelativeImportExtensions turns them into `.js` in the built package.
-import { DEFAULT_HARD_CAP_USD, DEFAULT_PRICE_PER_1K, estimateCostUsd } from "./budget-gate.ts";
+import { DEFAULT_HARD_CAP_USD, DEFAULT_PRICE_PER_1K, lookupRatePer1K } from "./budget-gate.ts";
 import type { PriceTable } from "./budget-gate.ts";
 
 /** Float tolerance for "lands exactly on the cap": 0.1 + 0.1 + 0.12 must not read as over 0.32. */
@@ -73,8 +78,12 @@ export function evaluateReservation(s: ReservationState, estimateUsd: number): R
 
 /**
  * Worst-case cost of one call: every prompt token plus the full output allowance, priced with the
- * same table as the budget gate. Returns +Infinity when the output allowance is missing or invalid,
- * which evaluateReservation refuses — a call you cannot bound is a call you cannot reserve.
+ * same table as the budget gate. Returns +Infinity — which evaluateReservation refuses — when the
+ * output allowance is missing or invalid, or when the model has no usable price in the table. A call
+ * you cannot bound is a call you cannot reserve. Zero-cost models (see budget-gate) return 0.
+ *
+ * Price the worst case with the rate your provider will actually bill for this request, including
+ * long-context tiers. A table that prices a tiered request at the base rate under-reserves it.
  */
 export function estimateMaxCostUsd(
   model: string,
@@ -86,8 +95,10 @@ export function estimateMaxCostUsd(
   if (typeof maxOutputTokens !== "number" || !Number.isFinite(out) || out < 0) {
     return Number.POSITIVE_INFINITY;
   }
+  const rate = lookupRatePer1K(model, prices);
+  if (rate === undefined) return Number.POSITIVE_INFINITY;
   const prompt = Math.max(0, Number(promptTokens) || 0);
-  return estimateCostUsd(model, prompt + out, prices);
+  return ((prompt + out) / 1000) * rate;
 }
 
 export interface SettlementInput {
@@ -95,27 +106,35 @@ export interface SettlementInput {
   reservedUsd: number;
   /** The hold this call was admitted with (ReservationDecision.reserveUsd). */
   holdUsd: number;
-  /** What the call actually cost. */
-  actualUsd: number;
+  /** What the call actually cost. null (or anything unreadable) when it is not known. */
+  actualUsd: number | null;
 }
 
 export interface Settlement {
   /** Outstanding reservations after releasing this hold. Never negative. */
   reservedUsd: number;
-  /** Amount to add to settled spend. Always the real cost. */
+  /** Amount to add to settled spend: the real cost, or the hold when the real cost is unknown. */
   accrueUsd: number;
+  /** True when the actual cost was missing or unreadable and the hold was charged instead. */
+  actualUnknown: boolean;
   /** True when the call cost more than its hold — the worst-case estimate was wrong. */
   overrun: boolean;
 }
 
-/** Release a call's hold and accrue its real cost. Pure arithmetic; apply it atomically in storage. */
+/**
+ * Release a call's hold and accrue its cost. Pure arithmetic; apply it atomically in storage.
+ * Expire a stale hold by settling it with `actualUsd: null`.
+ */
 export function settleReservation(i: SettlementInput): Settlement {
   const reserved = Math.max(0, Number(i.reservedUsd) || 0);
   const hold = Math.max(0, Number(i.holdUsd) || 0);
-  const actual = Math.max(0, Number(i.actualUsd) || 0);
+  const raw = i.actualUsd;
+  const actualUnknown = typeof raw !== "number" || !Number.isFinite(raw) || raw < 0;
+  const accrueUsd = actualUnknown ? hold : raw;
   return {
     reservedUsd: Math.max(0, reserved - hold),
-    accrueUsd: actual,
-    overrun: actual - hold > EPSILON_USD,
+    accrueUsd,
+    actualUnknown,
+    overrun: !actualUnknown && accrueUsd - hold > EPSILON_USD,
   };
 }

@@ -1,5 +1,5 @@
 -- Reference schema for spendbrake (D1 / SQLite).
--- Two tables: one spend window, one approval queue.
+-- Three tables: a spend window, its open reservations, and an approval queue.
 
 -- ── Spend window ────────────────────────────────────────────────────────────
 -- One row per window. `date_string` is the window key; swap the format for a
@@ -18,6 +18,32 @@ CREATE TABLE IF NOT EXISTS agent_spend_windows (
   kill_switch_hit INTEGER NOT NULL DEFAULT 0,
   updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ── Spend reservations ──────────────────────────────────────────────────────
+-- One row per admitted call: its worst-case hold, open until settled or expired.
+-- Open holds count against the cap for every other admission check, which is
+-- what stops concurrent calls from overshooting before any of them is recorded.
+-- Use the statements in src/reservation-sql.ts; they are tested against this
+-- schema. `id` is caller-generated (e.g. crypto.randomUUID()) so a retried
+-- settle can find its row and be a no-op.
+CREATE TABLE IF NOT EXISTS agent_spend_reservations (
+  id            TEXT    PRIMARY KEY,
+  date_string   TEXT    NOT NULL REFERENCES agent_spend_windows (date_string),
+  hold_usd      REAL    NOT NULL CHECK (hold_usd >= 0),
+  state         TEXT    NOT NULL DEFAULT 'open'
+                  CHECK (state IN ('open','settled','expired')),
+  -- NULL when settled with an unreadable cost; the hold was charged instead.
+  actual_usd    REAL,
+  expires_at_ms INTEGER NOT NULL,
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  settled_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_spend_reservations_open
+  ON agent_spend_reservations (date_string, state);
+
+CREATE INDEX IF NOT EXISTS idx_spend_reservations_expiry
+  ON agent_spend_reservations (state, expires_at_ms);
 
 -- ── Approval queue ──────────────────────────────────────────────────────────
 -- Machine-generated items stage here as 'pending'. Publication reads

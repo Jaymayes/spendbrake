@@ -37,6 +37,20 @@ const ZERO_COST = /^@cf\//i;
 /** Unknown model → conservative $1 per 1M tokens rather than free. */
 const DEFAULT_RATE_PER_1K = 0.001;
 
+/**
+ * The table's USD-per-1K rate for `model`: 0 for zero-cost models, `undefined` when the model is
+ * missing or has no usable price. Callers decide what "no price" means — the budget gate accrues a
+ * conservative default, the reservation gate refuses the call.
+ */
+export function lookupRatePer1K(model: string, prices: PriceTable = DEFAULT_PRICE_PER_1K): number | undefined {
+  const m = String(model ?? "").toLowerCase();
+  if (!m) return undefined;
+  if (ZERO_COST.test(m)) return 0;
+  const key = Object.keys(prices).find((k) => m.includes(k));
+  const rate = key === undefined ? Number.NaN : Number(prices[key]);
+  return Number.isFinite(rate) && rate > 0 ? rate : undefined;
+}
+
 /** Estimated USD for `tokens` total tokens on `model`. Unknown models are priced, not skipped. */
 export function estimateCostUsd(
   model: string,

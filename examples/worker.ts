@@ -58,7 +58,27 @@ export async function budgetGate(env: Env) {
 /** Post-call accrual. The sticky switch flips inside the same statement as the accrual. */
 export async function budgetAccrue(env: Env, model: string, tokens: number) {
   const costUsd = estimateCostUsd(model, tokens);
-  if (!(costUsd > 0)) return; // zero-cost models accrue nothing
+
+  // Unreadable usage (NaN, missing, negative) prices as Infinity: the call ran and its cost is
+  // unknown, so it must not accrue as free. Don't bind Infinity — D1 bindings travel as JSON, which
+  // has no representation for it. Trip the sticky switch directly; an operator clears it.
+  if (!Number.isFinite(costUsd)) {
+    console.error("[control-plane] unreadable token usage — tripping the kill switch:", model);
+    await env.DB.prepare(
+      `INSERT INTO agent_spend_windows (date_string, total_spend_usd, hard_cap_usd, call_count, kill_switch_hit)
+         VALUES (strftime('%Y-%m-%d','now'), 0, ?1, 1, 1)
+       ON CONFLICT(date_string) DO UPDATE SET
+         call_count      = call_count + 1,
+         kill_switch_hit = 1,
+         updated_at      = datetime('now')`,
+    )
+      .bind(DEFAULT_HARD_CAP_USD)
+      .run();
+    await env.CACHE?.delete(CACHE_KEY).catch(() => {});
+    return;
+  }
+  // Zero-cost models accrue nothing — and a negative cost (a bad price table) never subtracts.
+  if (!(costUsd > 0)) return;
 
   await env.DB.prepare(
     `INSERT INTO agent_spend_windows (date_string, total_spend_usd, hard_cap_usd, call_count)
@@ -66,7 +86,9 @@ export async function budgetAccrue(env: Env, model: string, tokens: number) {
      ON CONFLICT(date_string) DO UPDATE SET
        total_spend_usd = total_spend_usd + ?1,
        call_count      = call_count + 1,
-       kill_switch_hit = CASE WHEN total_spend_usd + ?1 >= hard_cap_usd
+       -- 1e-9 tolerance: incremental REAL accrual drifts, and ten $0.10 calls store as
+       -- 0.9999999999999999 — a bare >= would never trip on spend of exactly the cap.
+       kill_switch_hit = CASE WHEN total_spend_usd + ?1 >= hard_cap_usd - 1e-9
                               THEN 1 ELSE kill_switch_hit END,
        updated_at      = datetime('now')`,
   )

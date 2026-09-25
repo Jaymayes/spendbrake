@@ -40,8 +40,51 @@ const AI_PATTERNS: RegExp[] = [
   /\bgenerated\s+(?:with|by)\s+AI\b/i,
 ];
 
-function matchesAny(text: string, patterns: RegExp[]): boolean {
-  return patterns.some((re) => re.test(text));
+/**
+ * Words that turn a marker into its opposite. Without this, "This post is not sponsored" and
+ * "contains no affiliate links" satisfied the ad requirement — the guard accepted the literal
+ * opposite of a disclosure and failed open.
+ */
+const NEGATIONS = new Set(["not", "no", "non", "never", "without", "neither", "nor", "zero"]);
+
+/**
+ * How far back a negation reaches, in words. Three covers "not sponsored", "not a paid
+ * partnership" and "in no way sponsored", while "There is no doubt this is sponsored" still counts
+ * as a disclosure because "no" is four words back.
+ */
+const NEGATION_REACH_WORDS = 3;
+
+/**
+ * Is the marker starting at `markerStart` negated? Only the marker's own clause is examined, so a
+ * negation in an earlier sentence or clause ("No purchase necessary, sponsored content") cannot
+ * cancel a real disclosure. Handles "n't" with a straight or curly apostrophe, and a "non-" prefix.
+ */
+function isNegated(text: string, markerStart: number): boolean {
+  const clause = text.slice(0, markerStart).split(/[.!?;:,()\n]/).pop() ?? "";
+  const words = clause
+    .toLowerCase()
+    .split(/[^a-z'’-]+/)
+    .map((w) => w.replace(/^-+|-+$/g, ""))
+    .filter(Boolean)
+    .slice(-NEGATION_REACH_WORDS);
+  return words.some((w) => NEGATIONS.has(w) || /n['’]t$/.test(w));
+}
+
+/**
+ * True when at least one match of any pattern is NOT negated. Every match is examined, so
+ * "Not a paid partnership, but it does contain affiliate links" still passes on the second marker.
+ */
+function hasUnnegatedMarker(text: string, patterns: RegExp[]): boolean {
+  for (const re of patterns) {
+    // A fresh global copy per call, so no lastIndex state carries between calls.
+    const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+    for (const m of text.matchAll(all)) {
+      // Patterns with a leading (^|[\s(>#]) group match one character early; skip past it.
+      const markerStart = (m.index ?? 0) + (m[1]?.length ?? 0);
+      if (!isNegated(text, markerStart)) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -59,8 +102,8 @@ export function checkDisclosures(
 
   const missing: DisclosureKind[] = [];
 
-  if (rules.requireAd && !matchesAny(text, AD_PATTERNS)) missing.push("ad");
-  if (rules.requireAiGenerated && !matchesAny(text, AI_PATTERNS)) missing.push("ai_generated");
+  if (rules.requireAd && !hasUnnegatedMarker(text, AD_PATTERNS)) missing.push("ad");
+  if (rules.requireAiGenerated && !hasUnnegatedMarker(text, AI_PATTERNS)) missing.push("ai_generated");
 
   for (const literal of rules.requireLiterals ?? []) {
     const needle = String(literal ?? "").trim();

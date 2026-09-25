@@ -17,7 +17,8 @@ export type ReleaseReason =
   | "awaiting_human_release"
   | "already_rejected"
   | "already_retracted"
-  | "already_released";
+  | "already_released"
+  | "unknown_status";
 
 export interface ReleaseDecision {
   allowed: boolean;
@@ -30,11 +31,17 @@ export interface ReleaseDecision {
  * Fails closed on every path that is not an explicit human release. Note that a rejected or
  * retracted item can never be published by re-releasing it — it must be re-staged as a new
  * item, so that the audit trail records a decision rather than a status flip.
+ *
+ * The status check is an ALLOW-list: only exactly "pending" can be released. An earlier version
+ * refused the three statuses it knew and let everything else through, so "REJECTED", " rejected",
+ * "archived" or a missing status published as soon as a releaser was set. Anything unrecognised is
+ * now refused as `unknown_status`; normalise statuses before calling if your store varies case.
  */
 export function evaluateRelease(s: ReleaseState): ReleaseDecision {
   if (s.status === "rejected") return { allowed: false, reason: "already_rejected" };
   if (s.status === "retracted") return { allowed: false, reason: "already_retracted" };
   if (s.status === "released") return { allowed: false, reason: "already_released" };
+  if (s.status !== "pending") return { allowed: false, reason: "unknown_status" };
 
   const by = (s.releasedBy ?? "").trim();
   if (!by) return { allowed: false, reason: "awaiting_human_release" };

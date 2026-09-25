@@ -30,21 +30,26 @@ export const RESERVATION_SQL = {
   /**
    * Admit a hold only if settled spend + every open hold + this hold fits under the cap, the switch
    * is not tripped, and spend has not already reached the cap. No window row → no admission.
-   * The 1e-9 tolerance matches evaluateReservation, so a hold landing exactly on the cap is admitted.
+   * The 1e-9 tolerance matches EPSILON_USD in the JS gates: a hold landing exactly on the cap is
+   * admitted, and spend within 1e-9 below the cap already counts as having reached it.
    */
   reserve: `INSERT INTO agent_spend_reservations (id, date_string, hold_usd, expires_at_ms)
 SELECT ?1, w.date_string, ?3, ?4
   FROM agent_spend_windows w
  WHERE w.date_string = ?2
    AND w.kill_switch_hit = 0
-   AND w.total_spend_usd < w.hard_cap_usd
+   AND w.total_spend_usd < w.hard_cap_usd - 1e-9
    AND w.total_spend_usd + ${OPEN_HOLDS_FOR_WINDOW} + ?3 <= w.hard_cap_usd + 1e-9`,
 
-  /** Accrue a settled call and trip the sticky switch in the same statement. Open reservations only. */
+  /**
+   * Accrue a settled call and trip the sticky switch in the same statement. Open reservations only.
+   * The trip uses the same 1e-9 tolerance: incremental REAL accrual drifts (ten 0.1s store as
+   * 0.9999999999999999), so a bare `>= hard_cap_usd` never fires on spend of exactly the cap.
+   */
   accrueSettled: `UPDATE agent_spend_windows
    SET total_spend_usd = total_spend_usd + ?2,
        call_count      = call_count + 1,
-       kill_switch_hit = CASE WHEN total_spend_usd + ?2 >= hard_cap_usd THEN 1 ELSE kill_switch_hit END,
+       kill_switch_hit = CASE WHEN total_spend_usd + ?2 >= hard_cap_usd - 1e-9 THEN 1 ELSE kill_switch_hit END,
        updated_at      = datetime('now')
  WHERE date_string = (SELECT date_string FROM agent_spend_reservations WHERE id = ?1 AND state = 'open')`,
 
@@ -56,7 +61,7 @@ SELECT ?1, w.date_string, ?3, ?4
   /** Charge every expired open hold to its window, tripping the switch if that reaches the cap. */
   expireAccrue: `UPDATE agent_spend_windows
    SET total_spend_usd = total_spend_usd + ${EXPIRED_FOR_ROW},
-       kill_switch_hit = CASE WHEN total_spend_usd + ${EXPIRED_FOR_ROW} >= hard_cap_usd
+       kill_switch_hit = CASE WHEN total_spend_usd + ${EXPIRED_FOR_ROW} >= hard_cap_usd - 1e-9
                               THEN 1 ELSE kill_switch_hit END,
        updated_at      = datetime('now')
  WHERE date_string IN (SELECT date_string FROM agent_spend_reservations

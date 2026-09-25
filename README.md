@@ -90,6 +90,21 @@ into a database column with its own default, the code constant is no longer the 
 truth.** Lowering the constant then changes nothing for new rows. The upsert in
 `examples/worker.ts` writes `hard_cap_usd` explicitly for that reason.
 
+Two more, both found by testing rather than by reading:
+
+**"At the cap" needs a tolerance.** Money summed in floating point drifts: ten $0.10 calls add
+up to `0.9999999999999999`, which is *under* a $1.00 cap. A bare `spent >= cap` therefore never
+fires on spend of exactly the cap, and an eleventh call is admitted. Every cap comparison in the
+package, JavaScript and SQL alike, uses a shared tolerance of a billionth of a dollar
+(`EPSILON_USD`) — far below any real price, so it absorbs representation error without granting
+an allowance.
+
+**A cost that cannot be read is unbounded, not free.** `estimateCostUsd` returns `Infinity` when
+the token count is not a finite, non-negative number — a provider response with no usage, say.
+The call ran and its cost is unknown, so it must not accrue as $0. Recording `Infinity` trips the
+cap; `examples/worker.ts` sets the kill switch directly instead, because D1 bindings travel as
+JSON, which cannot carry `Infinity`.
+
 ### 2. Approval gate
 
 Machine-generated content stages as `pending` and requires an explicit human release. There
@@ -104,6 +119,12 @@ evaluateRelease({ status: "pending", releasedBy: null });
 evaluateRelease({ status: "pending", releasedBy: "operator@example.com" });
 // → { allowed: true, reason: "ok" }
 ```
+
+**Only a `pending` item can be released.** The status check is an allow-list: anything else —
+including an unrecognised or mis-cased status such as `"REJECTED"`, `" rejected"` or a missing
+one — is refused with `unknown_status`. An earlier version refused the three statuses it knew and
+let everything else through, so a mis-cased `"REJECTED"` published as soon as a releaser was set.
+Normalise statuses before calling if your store varies case.
 
 The gate is deliberately boring. Its value is that it exists in the write path rather than in
 a policy document.
@@ -122,6 +143,14 @@ checkDisclosures(copy, { requireAd: true, requireAiGenerated: true });
 
 Run these as inverse guards: the content does not publish unless the required markers are
 present. Asking a model to include a disclosure is a request. Checking for it is a control.
+
+**A negated marker does not count.** "This post is not sponsored", "contains no affiliate links"
+and "not AI-generated" all contain a marker, and an earlier version accepted them — the guard
+passed the literal opposite of a disclosure. A marker now counts only when none of the three words
+before it, within its own clause, is a negation (`not`, `no`, `non-`, `never`, `without`, `nor`,
+`neither`, `zero`, or an `n't` contraction). The clause limit matters: "No purchase necessary,
+sponsored content" is still a disclosure. It is a deterministic heuristic, not language
+understanding — a negation four or more words back ("not in any way sponsored") is not caught.
 
 ### 4. Retraction
 
@@ -242,7 +271,7 @@ The spend row must be updated atomically. The reference upsert flips the sticky 
 same statement that accrues the cost, so a concurrent write cannot slip past the boundary:
 
 ```sql
-kill_switch_hit = CASE WHEN total_spend_usd + ?1 >= hard_cap_usd THEN 1 ELSE kill_switch_hit END
+kill_switch_hit = CASE WHEN total_spend_usd + ?1 >= hard_cap_usd - 1e-9 THEN 1 ELSE kill_switch_hit END
 ```
 
 If you cache the gate decision (recommended — this runs on every inference), **invalidate the

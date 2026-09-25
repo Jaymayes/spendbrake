@@ -7,8 +7,20 @@
 //   2. The kill switch is STICKY. Concurrent calls that straddle the cap boundary would each
 //      individually read as under-cap; the sticky flag is what closes that window.
 //   3. A non-positive cap falls back to the default, NEVER to unlimited.
+//   4. "Reached the cap" is judged with a tolerance. Money summed in floating point drifts: ten
+//      $0.10 calls total 0.9999999999999999, which is UNDER a $1.00 cap, so without a tolerance
+//      spending exactly the cap never reads as reaching it and an eleventh call is admitted.
+//   5. A cost that cannot be read is UNBOUNDED, never zero. A provider response with no usage must
+//      not accrue as a free call.
 
 export const DEFAULT_HARD_CAP_USD = 1.0;
+
+/**
+ * Float tolerance shared by every cap comparison in the package (and mirrored as `1e-9` in the
+ * SQL). A billionth of a dollar is far below any real price, so it absorbs representation error
+ * without granting a real allowance.
+ */
+export const EPSILON_USD = 1e-9;
 
 /** Blended USD per 1K tokens (input + output), by model-name substring. */
 export type PriceTable = Record<string, number>;
@@ -51,19 +63,29 @@ export function lookupRatePer1K(model: string, prices: PriceTable = DEFAULT_PRIC
   return Number.isFinite(rate) && rate > 0 ? rate : undefined;
 }
 
-/** Estimated USD for `tokens` total tokens on `model`. Unknown models are priced, not skipped. */
+/**
+ * Estimated USD for `tokens` total tokens on `model`. Unknown models are priced, not skipped.
+ *
+ * An unreadable token count — not a finite, non-negative number (NaN, undefined, null, a negative
+ * value, a string) — returns `Infinity`: the call happened and its cost is unknown, so it must not
+ * accrue as free. This is the same posture `estimateMaxCostUsd` takes for an unbounded output.
+ * Recording `Infinity` trips the cap; if your store cannot hold it, set the kill switch directly
+ * (see `budgetAccrue` in examples/worker.ts). A zero-cost model costs nothing whatever the count.
+ */
 export function estimateCostUsd(
   model: string,
   tokens: number,
   prices: PriceTable = DEFAULT_PRICE_PER_1K,
 ): number {
-  const t = Math.max(0, Number(tokens) || 0);
-  if (t === 0) return 0;
-  const m = (model ?? "").toLowerCase();
+  const m = String(model ?? "").toLowerCase();
   if (!m || ZERO_COST.test(m)) return 0;
+  if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (tokens === 0) return 0;
   const key = Object.keys(prices).find((k) => m.includes(k));
   const rate = key ? prices[key] : DEFAULT_RATE_PER_1K;
-  return (t / 1000) * rate;
+  return (tokens / 1000) * rate;
 }
 
 export interface BudgetState {
@@ -102,7 +124,7 @@ export function evaluateBudget(s: BudgetState): BudgetDecision {
   const capUsd = Number(s.capUsd) > 0 ? Number(s.capUsd) : DEFAULT_HARD_CAP_USD;
   const spentUsd = Math.max(0, Number(s.spentUsd) || 0);
   if (s.killSwitchHit) return { allowed: false, reason: "kill_switch", spentUsd, capUsd };
-  if (spentUsd >= capUsd) return { allowed: false, reason: "cap_exceeded", spentUsd, capUsd };
+  if (spentUsd >= capUsd - EPSILON_USD) return { allowed: false, reason: "cap_exceeded", spentUsd, capUsd };
   return { allowed: true, reason: "ok", spentUsd, capUsd };
 }
 

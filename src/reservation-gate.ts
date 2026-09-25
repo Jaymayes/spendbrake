@@ -23,11 +23,11 @@
 
 // `.ts` extensions so the source runs directly under Node's type stripping (as the tests do);
 // tsconfig's rewriteRelativeImportExtensions turns them into `.js` in the built package.
-import { DEFAULT_HARD_CAP_USD, DEFAULT_PRICE_PER_1K, lookupRatePer1K } from "./budget-gate.ts";
+// EPSILON_USD is shared with the budget gate so the two can never disagree about what "at the cap"
+// means: 0.1 + 0.2 (0.30000000000000004) must fit a 0.3 cap, and ten 0.1s (0.9999999999999999)
+// must read as reaching a 1.00 cap.
+import { DEFAULT_HARD_CAP_USD, DEFAULT_PRICE_PER_1K, EPSILON_USD, lookupRatePer1K } from "./budget-gate.ts";
 import type { PriceTable } from "./budget-gate.ts";
-
-/** Float tolerance for "lands exactly on the cap": 0.1 + 0.1 + 0.12 must not read as over 0.32. */
-const EPSILON_USD = 1e-9;
 
 export interface ReservationState {
   /** Spend already settled in this window. */
@@ -64,7 +64,7 @@ export function evaluateReservation(s: ReservationState, estimateUsd: number): R
   const base = { spentUsd, reservedUsd, capUsd, headroomUsd };
 
   if (s.killSwitchHit) return { allowed: false, reason: "kill_switch", reserveUsd: 0, ...base };
-  if (spentUsd >= capUsd) return { allowed: false, reason: "cap_exceeded", reserveUsd: 0, ...base };
+  if (spentUsd >= capUsd - EPSILON_USD) return { allowed: false, reason: "cap_exceeded", reserveUsd: 0, ...base };
 
   const est = Number(estimateUsd);
   if (typeof estimateUsd !== "number" || !Number.isFinite(est) || est < 0) {

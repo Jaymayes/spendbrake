@@ -267,16 +267,47 @@ test("a negative hold is rejected by the schema, not silently buying headroom", 
   assert.equal(openHolds(db), 0);
 });
 
-test(
-  "spending exactly the cap in small calls trips the sticky switch",
-  { todo: "DEFECT-7 (medium): ten $0.10 settles sum to 0.9999999999999999, so the `>= hard_cap_usd` trip never fires at the default $1.00 cap" },
-  () => {
-    const db = fresh();
-    for (let i = 0; i < 10; i++) {
-      assert.equal(reserve(db, `c${i}`, 0.1, NOW, 1), true);
-      settle(db, `c${i}`, 0.1);
-    }
-    // $1.00 has been spent against a $1.00 cap. The switch must be set.
-    assert.equal(windowRow(db).kill_switch_hit, 1, `spent ${windowRow(db).total_spend_usd} of 1.00`);
-  },
-);
+// Fixed DEFECT-7: ten $0.10 settles sum to 0.9999999999999999, so a bare `>= hard_cap_usd` trip
+// never fired at the default $1.00 cap.
+test("spending exactly the cap in small calls trips the sticky switch", () => {
+  const db = fresh();
+  for (let i = 0; i < 10; i++) {
+    assert.equal(reserve(db, `c${i}`, 0.1, NOW, 1), true);
+    settle(db, `c${i}`, 0.1);
+  }
+  assert.ok(windowRow(db).total_spend_usd < 1, "precondition: the stored total really is just under 1.00");
+  assert.equal(windowRow(db).kill_switch_hit, 1, `spent ${windowRow(db).total_spend_usd} of 1.00`);
+  assert.equal(reserve(db, "eleventh", 0.001, NOW, 1), false, "and the next call is refused");
+});
+
+test("expiry that lands exactly on the cap trips the switch despite drift", () => {
+  // SQLite's SUM() uses compensated summation, so ten 0.1 holds expiring together sum to exactly
+  // 1.0 and never drift. Drift comes from INCREMENTAL accrual: nine settles leave the stored total at
+  // 0.8999999999999999, and one expiring 0.1 hold then lands at 0.9999999999999999. (An earlier draft
+  // of this test expired all ten at once and passed before the fix — it proved nothing.)
+  const db = fresh();
+  for (let i = 0; i < 9; i++) {
+    reserve(db, `s${i}`, 0.1, NOW, 1);
+    settle(db, `s${i}`, 0.1);
+  }
+  reserve(db, "stale", 0.1, NOW, 1);
+  const later = NOW + 2 * TTL;
+  batch(db, [
+    [SQL.expireAccrue, [later]],
+    [SQL.expireMark, [later]],
+  ]);
+  assert.ok(windowRow(db).total_spend_usd < 1, `precondition: total ${windowRow(db).total_spend_usd} drifted under 1.00`);
+  assert.equal(windowRow(db).kill_switch_hit, 1, `expired total ${windowRow(db).total_spend_usd} of 1.00`);
+});
+
+test("drifted at-cap spend refuses even a zero-cost hold, with the switch cleared", () => {
+  // Isolates reserve's own spend-at-cap tolerance: the sticky switch would otherwise mask it.
+  const db = fresh();
+  for (let i = 0; i < 10; i++) {
+    reserve(db, `c${i}`, 0.1, NOW, 1);
+    settle(db, `c${i}`, 0.1);
+  }
+  db.prepare("UPDATE agent_spend_windows SET kill_switch_hit = 0").run();
+  assert.ok(windowRow(db).total_spend_usd < 1, "precondition: stored total drifted under 1.00");
+  assert.equal(reserve(db, "zero", 0, NOW, 1), false);
+});

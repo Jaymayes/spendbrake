@@ -13,16 +13,23 @@ MIT licensed. No dependencies. Works on Workers, Node, Deno, or Bun.
 
 ## Try it
 
-Not on npm yet. From a clone:
+Not on npm yet. Install straight from GitHub — npm builds it on install:
+
+```sh
+npm install github:Jaymayes/spendbrake
+```
+
+Or work from a clone:
 
 ```sh
 git clone https://github.com/Jaymayes/spendbrake && cd spendbrake
 npm test        # runs the TypeScript tests directly; needs Node 22.18+ — no install step
-npm i && npm run build   # emits dist/; the `import ... from "spendbrake"` examples below resolve to it
+npm i           # installs TypeScript and builds dist/ via the prepare script
 ```
 
 The storage tests run the reference SQL against real SQLite (`node:sqlite`), so no database or
-account is needed.
+account is needed. `npm run test:mutation` injects deliberate bugs into the guards, one at a time
+in a scratch copy, and reports any the suite fails to catch.
 
 ---
 

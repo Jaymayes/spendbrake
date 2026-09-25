@@ -19,6 +19,10 @@ Not on npm yet. Install straight from GitHub — npm builds it on install:
 npm install github:Jaymayes/spendbrake
 ```
 
+npm 11 may warn that `spendbrake (prepare: npm run build)` is "not yet covered by allowScripts".
+That script is the build, and the install still builds with default settings. If your setup blocks
+unapproved scripts, approve it with the command npm suggests: `npm install-scripts approve spendbrake`.
+
 Or work from a clone:
 
 ```sh

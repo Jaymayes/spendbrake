@@ -87,14 +87,21 @@ invoice, not a ceiling.
 set for the window. Without this, spend that lands concurrently can straddle the boundary
 and each individual call sees itself as under the cap.
 
-**A non-positive cap falls back to the default, never to unlimited.** This is the single
-most important line in the file:
+**A cap that cannot be enforced falls back to the default, never to unlimited.** This is the
+single most important line in the file:
 
 ```ts
-const capUsd = Number(s.capUsd) > 0 ? Number(s.capUsd) : DEFAULT_HARD_CAP_USD;
+return Number.isFinite(n) && n > 0 ? n : DEFAULT_HARD_CAP_USD; // effectiveCapUsd()
 ```
 
-A missing config value must not read as "no limit."
+A missing config value must not read as "no limit" — and neither may `Infinity`, which an earlier
+version accepted as a real cap, so nothing ever blocked. Zero, negative, `NaN`, missing and
+`Infinity` all fall back to the default.
+
+**A spend reading that cannot be read blocks.** `NaN`, `undefined`, `null` or garbage returns
+`invalid_spend` instead of reading as $0, which would silently reset the day's spend. A numeric
+string such as `"0.10"` still counts, since some stores return REAL columns as text. It is the loop
+breaker's rule for a corrupt counter, applied to money.
 
 There is a fourth thing that is a real trap and worth stating plainly: **if you write the cap
 into a database column with its own default, the code constant is no longer the source of
@@ -137,6 +144,10 @@ one — is refused with `unknown_status`. An earlier version refused the three s
 let everything else through, so a mis-cased `"REJECTED"` published as soon as a releaser was set.
 Normalise statuses before calling if your store varies case.
 
+A releaser is a non-blank string or a finite number (an integer user id). A boolean, an object or
+`NaN` is not a human identity and returns `awaiting_human_release` — it never throws, so the gate,
+not your `catch` block, makes the decision.
+
 The gate is deliberately boring. Its value is that it exists in the write path rather than in
 a policy document.
 
@@ -162,6 +173,15 @@ before it, within its own clause, is a negation (`not`, `no`, `non-`, `never`, `
 `neither`, `zero`, or an `n't` contraction). The clause limit matters: "No purchase necessary,
 sponsored content" is still a disclosure. It is a deterministic heuristic, not language
 understanding — a negation four or more words back ("not in any way sponsored") is not caught.
+
+**Two more ways a marker can look present and not be:**
+
+- `#ad-free` and `#ai-free` are claims of *no* ad and *no* AI, so a hashtag followed by a hyphen or
+  dash does not count. Ordinary punctuation does: `#ad.`, `#ad,` and `(#ad)` all still pass.
+- The guard judges what a reader sees. **HTML comments are stripped first**, so `<!-- #ad -->` is
+  not a disclosure, and an unterminated `<!--` hides everything after it. Required literals are
+  judged the same way. CSS-hidden text (`display:none`) is **not** detected — that needs rendering,
+  which a deterministic text check does not do. Pass rendered text if your copy can hide content.
 
 ### 4. Retraction
 
@@ -196,6 +216,8 @@ Every way of not knowing the cost fails closed:
   and it does not read "no price" as free. Price the worst case at the rate your provider will
   actually bill for that request, including long-context tiers.
 - **An estimate that is `NaN`, negative or missing** — refused, not treated as zero.
+- **A spend or outstanding-holds reading that cannot be read** — refused as `invalid_state`. A
+  corrupt holds total read as $0 would buy headroom that does not exist.
 - **An actual cost that cannot be read** — settlement charges the hold, never zero, and says so
   (`actualUnknown: true`). A zero there would refund the whole hold for a call that ran.
 - **A hold that never settles** (crash, timeout) — it expires *as spent*. Ledger escrow refunds an

@@ -8,8 +8,8 @@ export type ItemStatus = "pending" | "released" | "rejected" | "retracted";
 
 export interface ReleaseState {
   status: ItemStatus;
-  /** Identity of the human releasing it. Null/empty means nobody has. */
-  releasedBy?: string | null;
+  /** Identity of the human releasing it: a name/email, or a numeric user id. Null/empty means nobody has. */
+  releasedBy?: string | number | null;
 }
 
 export type ReleaseReason =
@@ -43,7 +43,12 @@ export function evaluateRelease(s: ReleaseState): ReleaseDecision {
   if (s.status === "released") return { allowed: false, reason: "already_released" };
   if (s.status !== "pending") return { allowed: false, reason: "unknown_status" };
 
-  const by = (s.releasedBy ?? "").trim();
+  // A releaser is a non-blank string, or a finite number (an integer user id). Anything else —
+  // a boolean, an object, NaN — is not a human identity and fails closed. An earlier version called
+  // .trim() on whatever arrived, so an integer id threw TypeError and the caller's catch decided.
+  const raw: unknown = s.releasedBy;
+  const by =
+    typeof raw === "string" ? raw.trim() : typeof raw === "number" && Number.isFinite(raw) ? String(raw) : "";
   if (!by) return { allowed: false, reason: "awaiting_human_release" };
 
   return { allowed: true, reason: "ok" };

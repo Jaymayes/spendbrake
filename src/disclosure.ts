@@ -26,16 +26,19 @@ export interface DisclosureDecision {
  * deliberately strict about the marker itself — a check that accepts a paraphrase is not a
  * check. Override per-call if your jurisdiction or platform requires different wording.
  */
+// Hashtag markers end with (?![\w‐-―-]) rather than \b: \b matches before a hyphen, so an
+// earlier version read "#ad-free" and "#ai-free" — claims of NO ad and NO AI — as disclosures.
+// Ordinary punctuation after a tag ("#ad." "#ad," "(#ad)") still counts.
 const AD_PATTERNS: RegExp[] = [
-  /(^|[\s(>#])#ad\b/i,
+  /(^|[\s(>#])#ad(?![\w‐-―-])/i,
   /\bpaid\s+partnership\b/i,
   /\baffiliate\s+link/i,
   /\bsponsored\b/i,
 ];
 
 const AI_PATTERNS: RegExp[] = [
-  /(^|[\s(>#])#aigenerated\b/i,
-  /(^|[\s(>#])#ai\b/i,
+  /(^|[\s(>#])#aigenerated(?![\w‐-―-])/i,
+  /(^|[\s(>#])#ai(?![\w‐-―-])/i,
   /\bAI[- ]generated\b/i,
   /\bgenerated\s+(?:with|by)\s+AI\b/i,
 ];
@@ -96,19 +99,24 @@ export function checkDisclosures(
   rules: DisclosureRules = {},
 ): DisclosureDecision {
   const text = String(content ?? "");
-  if (!text.trim()) {
+  // Judge what a READER sees. HTML comments never render, so a marker inside one is not a
+  // disclosure; an unterminated comment hides the rest of the document, so it is stripped to the
+  // end. An earlier version matched the raw text, so "<!-- #ad -->" passed. CSS-hidden text
+  // (display:none) is NOT detected — that needs rendering, which this deterministic guard does not do.
+  const visible = text.replace(/<!--[\s\S]*?(?:-->|$)/g, " ");
+  if (!visible.trim()) {
     return { allowed: false, reason: "empty_content", missing: [] };
   }
 
   const missing: DisclosureKind[] = [];
 
-  if (rules.requireAd && !hasUnnegatedMarker(text, AD_PATTERNS)) missing.push("ad");
-  if (rules.requireAiGenerated && !hasUnnegatedMarker(text, AI_PATTERNS)) missing.push("ai_generated");
+  if (rules.requireAd && !hasUnnegatedMarker(visible, AD_PATTERNS)) missing.push("ad");
+  if (rules.requireAiGenerated && !hasUnnegatedMarker(visible, AI_PATTERNS)) missing.push("ai_generated");
 
   for (const literal of rules.requireLiterals ?? []) {
     const needle = String(literal ?? "").trim();
     if (!needle) continue;
-    if (!text.toLowerCase().includes(needle.toLowerCase())) missing.push(needle);
+    if (!visible.toLowerCase().includes(needle.toLowerCase())) missing.push(needle);
   }
 
   return missing.length > 0

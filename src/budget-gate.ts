@@ -64,7 +64,29 @@ export function lookupRatePer1K(model: string, prices: PriceTable = DEFAULT_PRIC
 }
 
 /**
- * Estimated USD for `tokens` total tokens on `model`. Unknown models are priced, not skipped.
+ * A cap that can actually be enforced: a finite, positive number. Anything else — zero, negative,
+ * NaN, missing, or Infinity — falls back to the default, because every one of them would otherwise
+ * read as "no limit". An earlier version accepted Infinity as a real cap, so nothing ever blocked.
+ */
+export function effectiveCapUsd(cap: unknown): number {
+  const n = Number(cap);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_HARD_CAP_USD;
+}
+
+/**
+ * A money reading, or NaN when it cannot be read. Numbers and numeric strings (some stores return
+ * REAL columns as text) are readings; undefined, null, "" and anything non-numeric are not. Callers
+ * must treat NaN as corrupt and fail CLOSED — never coerce it to 0, which silently resets spend.
+ */
+export function readUsd(x: unknown): number {
+  if (typeof x === "number") return x;
+  if (typeof x === "string" && x.trim() !== "") return Number(x);
+  return Number.NaN;
+}
+
+/**
+ * Estimated USD for `tokens` total tokens on `model`. Unknown models are priced, not skipped —
+ * including a missing or empty model name, which is priced at the conservative default rate.
  *
  * An unreadable token count — not a finite, non-negative number (NaN, undefined, null, a negative
  * value, a string) — returns `Infinity`: the call happened and its cost is unknown, so it must not
@@ -78,7 +100,9 @@ export function estimateCostUsd(
   prices: PriceTable = DEFAULT_PRICE_PER_1K,
 ): number {
   const m = String(model ?? "").toLowerCase();
-  if (!m || ZERO_COST.test(m)) return 0;
+  // An empty model is UNKNOWN, not free: it falls through to the default rate below. (An earlier
+  // version returned 0 here, so a missing model name accrued nothing.)
+  if (ZERO_COST.test(m)) return 0;
   if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
     return Number.POSITIVE_INFINITY;
   }
@@ -94,7 +118,7 @@ export interface BudgetState {
   killSwitchHit?: boolean;
 }
 
-export type BudgetReason = "ok" | "kill_switch" | "cap_exceeded" | "store_unavailable";
+export type BudgetReason = "ok" | "kill_switch" | "cap_exceeded" | "store_unavailable" | "invalid_spend";
 
 export interface BudgetDecision {
   allowed: boolean;
@@ -118,12 +142,17 @@ export interface BudgetOptions {
 
 /**
  * Decide whether one more paid inference is allowed.
- * BLOCKED when the sticky kill switch is set OR spend has reached the cap.
+ * BLOCKED when the sticky kill switch is set, the spend reading is unreadable, OR spend has
+ * reached the cap.
  */
 export function evaluateBudget(s: BudgetState): BudgetDecision {
-  const capUsd = Number(s.capUsd) > 0 ? Number(s.capUsd) : DEFAULT_HARD_CAP_USD;
-  const spentUsd = Math.max(0, Number(s.spentUsd) || 0);
+  const capUsd = effectiveCapUsd(s.capUsd);
+  const raw = readUsd(s.spentUsd);
+  const spentUsd = Number.isNaN(raw) ? raw : Math.max(0, raw);
   if (s.killSwitchHit) return { allowed: false, reason: "kill_switch", spentUsd, capUsd };
+  // An unreadable spend fails CLOSED — the loop gate's rule for a corrupt counter. An earlier
+  // version coerced it to $0, which silently reset the day's spend and admitted the call.
+  if (Number.isNaN(spentUsd)) return { allowed: false, reason: "invalid_spend", spentUsd, capUsd };
   if (spentUsd >= capUsd - EPSILON_USD) return { allowed: false, reason: "cap_exceeded", spentUsd, capUsd };
   return { allowed: true, reason: "ok", spentUsd, capUsd };
 }
@@ -142,6 +171,6 @@ export function evaluateBudgetOnStoreError(
     allowed,
     reason: "store_unavailable",
     spentUsd: 0,
-    capUsd: Number(capUsd) > 0 ? Number(capUsd) : DEFAULT_HARD_CAP_USD,
+    capUsd: effectiveCapUsd(capUsd),
   };
 }

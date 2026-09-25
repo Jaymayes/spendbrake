@@ -26,7 +26,9 @@
 // EPSILON_USD is shared with the budget gate so the two can never disagree about what "at the cap"
 // means: 0.1 + 0.2 (0.30000000000000004) must fit a 0.3 cap, and ten 0.1s (0.9999999999999999)
 // must read as reaching a 1.00 cap.
-import { DEFAULT_HARD_CAP_USD, DEFAULT_PRICE_PER_1K, EPSILON_USD, lookupRatePer1K } from "./budget-gate.ts";
+// effectiveCapUsd and readUsd are shared too, so a non-finite cap and a corrupt reading are judged
+// identically by both gates.
+import { DEFAULT_PRICE_PER_1K, EPSILON_USD, effectiveCapUsd, lookupRatePer1K, readUsd } from "./budget-gate.ts";
 import type { PriceTable } from "./budget-gate.ts";
 
 export interface ReservationState {
@@ -38,7 +40,13 @@ export interface ReservationState {
   killSwitchHit?: boolean;
 }
 
-export type ReservationReason = "ok" | "kill_switch" | "cap_exceeded" | "would_exceed_cap" | "invalid_estimate";
+export type ReservationReason =
+  | "ok"
+  | "kill_switch"
+  | "cap_exceeded"
+  | "would_exceed_cap"
+  | "invalid_estimate"
+  | "invalid_state";
 
 export interface ReservationDecision {
   allowed: boolean;
@@ -57,13 +65,19 @@ export interface ReservationDecision {
  * settled spend and every outstanding reservation against the cap.
  */
 export function evaluateReservation(s: ReservationState, estimateUsd: number): ReservationDecision {
-  const capUsd = Number(s.capUsd) > 0 ? Number(s.capUsd) : DEFAULT_HARD_CAP_USD;
-  const spentUsd = Math.max(0, Number(s.spentUsd) || 0);
-  const reservedUsd = Math.max(0, Number(s.reservedUsd) || 0);
-  const headroomUsd = Math.max(0, capUsd - spentUsd - reservedUsd);
+  const capUsd = effectiveCapUsd(s.capUsd);
+  const rawSpent = readUsd(s.spentUsd);
+  const rawReserved = readUsd(s.reservedUsd);
+  const spentUsd = Number.isNaN(rawSpent) ? rawSpent : Math.max(0, rawSpent);
+  const reservedUsd = Number.isNaN(rawReserved) ? rawReserved : Math.max(0, rawReserved);
+  const unreadable = Number.isNaN(spentUsd) || Number.isNaN(reservedUsd);
+  const headroomUsd = unreadable ? 0 : Math.max(0, capUsd - spentUsd - reservedUsd);
   const base = { spentUsd, reservedUsd, capUsd, headroomUsd };
 
   if (s.killSwitchHit) return { allowed: false, reason: "kill_switch", reserveUsd: 0, ...base };
+  // Unreadable spend or holds fail CLOSED. An earlier version coerced either to $0, so a corrupt
+  // reading of the outstanding holds bought headroom that did not exist.
+  if (unreadable) return { allowed: false, reason: "invalid_state", reserveUsd: 0, ...base };
   if (spentUsd >= capUsd - EPSILON_USD) return { allowed: false, reason: "cap_exceeded", reserveUsd: 0, ...base };
 
   const est = Number(estimateUsd);

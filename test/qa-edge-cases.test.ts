@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { DEFAULT_HARD_CAP_USD, estimateCostUsd, evaluateBudget } from "../src/budget-gate.ts";
+import { DEFAULT_HARD_CAP_USD, estimateCostUsd, evaluateBudget, evaluateBudgetOnStoreError } from "../src/budget-gate.ts";
 import { evaluateRelease } from "../src/approval-gate.ts";
 import { checkDisclosures } from "../src/disclosure.ts";
 import { estimateMaxCostUsd, evaluateReservation } from "../src/reservation-gate.ts";
@@ -122,22 +122,43 @@ test("one un-negated marker is enough, even when another is negated", () => {
   assert.equal(checkDisclosures("Not a paid partnership, but it does contain affiliate links.", AD).allowed, true);
 });
 
-test(
-  "'#ad-free' and '#ai-free' are not disclosures",
-  { todo: "DEFECT-2 (medium): the trailing \\b matches at a hyphen, so #ad-free and #ai-free count as markers" },
-  () => {
-    assert.equal(checkDisclosures("Enjoy the #ad-free edition.", AD).allowed, false);
-    assert.equal(checkDisclosures("Proudly #ai-free writing.", AI).allowed, false);
-  },
-);
+// Fixed DEFECT-2: the trailing \b matched at a hyphen, so "#ad-free" counted as a disclosure.
+test("'#ad-free' and '#ai-free' are not disclosures", () => {
+  assert.equal(checkDisclosures("Enjoy the #ad-free edition.", AD).allowed, false);
+  assert.equal(checkDisclosures("Proudly #ai-free writing.", AI).allowed, false);
+  assert.equal(checkDisclosures("Proudly #AIGenerated-free writing.", AI).allowed, false);
+});
 
-test(
-  "a marker the reader cannot see is not a disclosure",
-  { todo: "DEFECT-3 (medium, undocumented limitation): markers inside HTML comments count, though they never render" },
-  () => {
-    assert.equal(checkDisclosures("<!-- #ad --> Buy the Pro plan today.", AD).allowed, false);
-  },
-);
+test("a hashtag marker still counts before ordinary punctuation", () => {
+  for (const text of ["Honest review. #ad", "#ad, honestly.", "Honest review (#ad).", "#ad: this post pays us.", "#ad — this post pays us."]) {
+    assert.equal(checkDisclosures(text, AD).allowed, true, `must pass: "${text}"`);
+  }
+  assert.equal(checkDisclosures("Summary. #AI.", AI).allowed, true);
+  assert.equal(checkDisclosures("See #ads below.", AD).allowed, false, "#ads is not #ad");
+});
+
+// Fixed DEFECT-3: a marker inside an HTML comment counted, though a reader never sees it.
+test("a marker the reader cannot see is not a disclosure", () => {
+  assert.equal(checkDisclosures("<!-- #ad --> Buy the Pro plan today.", AD).allowed, false);
+  // An unterminated comment hides everything after it from the reader, so it hides the marker too.
+  assert.equal(checkDisclosures("Buy the Pro plan today. <!-- #ad", AD).allowed, false);
+  // Required literals are judged against what renders, too.
+  assert.equal(checkDisclosures("<!-- Results may vary --> Buy now.", { requireLiterals: ["Results may vary"] }).allowed, false);
+});
+
+test("documented limitation: CSS-hidden text is not detected", () => {
+  // The README says so explicitly. If rendering-aware detection is ever added, this fails on
+  // purpose — update the README's limitation sentence, then flip the assertion.
+  assert.equal(checkDisclosures('<span style="display:none">#ad</span> Buy the Pro plan.', AD).allowed, true);
+});
+
+test("a visible marker still counts when a comment is also present", () => {
+  assert.equal(checkDisclosures("<!-- tracking id 42 --> Honest review. #ad", AD).allowed, true);
+});
+
+test("content that is ONLY a hidden comment is empty to the reader", () => {
+  assert.equal(checkDisclosures("<!-- #ad #AIGenerated -->", { ...AD, ...AI }).reason, "empty_content");
+});
 
 test(
   "requireLiterals given a string (not an array) still requires the whole phrase",
@@ -177,13 +198,20 @@ test("only a PENDING item can be released — unknown or mis-cased statuses fail
   }
 });
 
-test(
-  "a non-string releaser gets a decision, not an exception",
-  { todo: "DEFECT-6 (medium): releasedBy = 42 (an integer user id) throws TypeError — the caller's catch block, not the gate, then decides" },
-  () => {
-    assert.doesNotThrow(() => evaluateRelease({ status: "pending", releasedBy: 42 as unknown as string }));
-  },
-);
+// Fixed DEFECT-6: an integer releaser (a user id) threw TypeError, so the caller's catch — not the
+// gate — decided.
+test("a non-string releaser gets a decision, not an exception", () => {
+  const as = (v: unknown) => v as string;
+  assert.doesNotThrow(() => evaluateRelease({ status: "pending", releasedBy: as(42) }));
+  // A finite number is an identity (an integer user id), so it is a release.
+  assert.equal(evaluateRelease({ status: "pending", releasedBy: as(42) }).allowed, true);
+  // Anything else is not a human identity — booleans, objects, NaN — and fails closed.
+  for (const v of [true, false, {}, [], Number.NaN, Number.POSITIVE_INFINITY]) {
+    const d = evaluateRelease({ status: "pending", releasedBy: as(v) });
+    assert.equal(d.allowed, false, `releasedBy=${String(v)} must not count as a release`);
+    assert.equal(d.reason, "awaiting_human_release");
+  }
+});
 
 // ── budget gate and cost estimation ─────────────────────────────────────────
 
@@ -207,21 +235,29 @@ test("the tolerance is a billionth of a dollar, not a real allowance", () => {
   assert.equal(evaluateBudget({ spentUsd: 0.999999, capUsd: 1 }).allowed, true);
 });
 
-test(
-  "an infinite cap is not treated as unlimited",
-  { todo: "DEFECT-8 (medium): capUsd = Infinity is accepted as a real cap, so nothing is ever blocked — contradicting 'never to unlimited'" },
-  () => {
-    assert.equal(evaluateBudget({ spentUsd: 1e9, capUsd: Number.POSITIVE_INFINITY }).allowed, false);
-  },
-);
+// Fixed DEFECT-8: capUsd = Infinity was accepted as a real cap, so nothing was ever blocked.
+test("an infinite cap is not treated as unlimited", () => {
+  const d = evaluateBudget({ spentUsd: 1e9, capUsd: Number.POSITIVE_INFINITY });
+  assert.equal(d.allowed, false);
+  assert.equal(d.capUsd, DEFAULT_HARD_CAP_USD, "a non-finite cap falls back to the default, like a non-positive one");
+  assert.equal(evaluateBudgetOnStoreError(Number.POSITIVE_INFINITY).capUsd, DEFAULT_HARD_CAP_USD);
+});
 
-test(
-  "a corrupt (NaN) spend reading fails closed, as the loop gate does for its counter",
-  { todo: "DEFECT-9 (medium): NaN spend reads as $0 and is ALLOWED; the loop gate blocks the same corruption — the two gates disagree" },
-  () => {
-    assert.equal(evaluateBudget({ spentUsd: Number.NaN, capUsd: 0.32 }).allowed, false);
-  },
-);
+// Fixed DEFECT-9: a corrupt spend reading read as $0 and was ALLOWED, while the loop gate blocks the
+// same corruption. Both now fail closed.
+test("a corrupt (NaN) spend reading fails closed, as the loop gate does for its counter", () => {
+  for (const spentUsd of [Number.NaN, undefined, null, "", "garbage"]) {
+    const d = evaluateBudget({ spentUsd: spentUsd as unknown as number, capUsd: 0.32 });
+    assert.equal(d.allowed, false, `spent=${JSON.stringify(spentUsd)} must not read as $0`);
+    assert.equal(d.reason, "invalid_spend");
+  }
+});
+
+test("a numeric string is a real reading, not corruption", () => {
+  // Some stores hand REAL columns back as strings; those must keep working.
+  assert.equal(evaluateBudget({ spentUsd: "0.10" as unknown as number, capUsd: 0.32 }).allowed, true);
+  assert.equal(evaluateBudget({ spentUsd: "0.32" as unknown as number, capUsd: 0.32 }).reason, "cap_exceeded");
+});
 
 // Fixed DEFECT-10: an unreadable token count used to cost $0, so a provider response with no
 // usage accrued nothing — silent free inference. It is now unbounded, the same posture as
@@ -242,13 +278,12 @@ test("a real zero is still zero, and a free model is still free whatever the cou
   assert.equal(estimateCostUsd("@cf/meta/llama-3.1-8b-instruct", Number.NaN), 0);
 });
 
-test(
-  "an empty model name is priced like any unknown model, not as free",
-  { todo: "DEFECT-11 (medium): estimateCostUsd('', n) returns 0, though the file's contract is 'unknown models are priced, not skipped'" },
-  () => {
-    assert.ok(estimateCostUsd("", 1000) > 0);
-  },
-);
+// Fixed DEFECT-11: an empty model name cost $0, against the file's own "unknown models are priced".
+test("an empty model name is priced like any unknown model, not as free", () => {
+  assert.ok(estimateCostUsd("", 1000) > 0);
+  assert.equal(estimateCostUsd("", 1000), estimateCostUsd("some-model-nobody-listed", 1000));
+  assert.ok(estimateCostUsd(undefined as unknown as string, 1000) > 0);
+});
 
 test(
   "a negative price never produces a negative cost",
@@ -269,23 +304,19 @@ test("drifted at-cap spend refuses even a zero-cost reservation", () => {
   assert.equal(d.reason, "cap_exceeded");
 });
 
-test(
-  "an infinite cap is not treated as unlimited by reservations either",
-  { todo: "DEFECT-8 (medium): same as the budget gate — capUsd = Infinity admits any reservation" },
-  () => {
-    const d = evaluateReservation({ spentUsd: 1e6, reservedUsd: 0, capUsd: Number.POSITIVE_INFINITY }, 1);
-    assert.equal(d.allowed, false);
-  },
-);
+test("an infinite cap is not treated as unlimited by reservations either", () => {
+  const d = evaluateReservation({ spentUsd: 1e6, reservedUsd: 0, capUsd: Number.POSITIVE_INFINITY }, 1);
+  assert.equal(d.allowed, false);
+  assert.equal(d.capUsd, DEFAULT_HARD_CAP_USD);
+});
 
-test(
-  "corrupt (NaN) outstanding holds do not read as zero holds",
-  { todo: "DEFECT-9 (medium): reservedUsd = NaN reads as $0 of holds, so a full window admits new calls" },
-  () => {
-    const d = evaluateReservation({ spentUsd: 0.3, reservedUsd: Number.NaN, capUsd: 0.32 }, 0.01);
-    assert.equal(d.allowed, false);
-  },
-);
+test("corrupt (NaN) outstanding holds do not read as zero holds", () => {
+  const d = evaluateReservation({ spentUsd: 0.3, reservedUsd: Number.NaN, capUsd: 0.32 }, 0.01);
+  assert.equal(d.allowed, false);
+  assert.equal(d.reason, "invalid_state");
+  const s = evaluateReservation({ spentUsd: Number.NaN, reservedUsd: 0, capUsd: 0.32 }, 0.01);
+  assert.equal(s.reason, "invalid_state");
+});
 
 test(
   "an unreadable prompt size cannot be bounded, so it cannot be reserved",

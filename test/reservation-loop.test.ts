@@ -31,8 +31,11 @@ test("outstanding reservations count against the cap — the concurrency case", 
 });
 
 test("landing exactly on the cap is allowed despite floating-point drift", () => {
-  // 0.1 + 0.1 + 0.12 is 0.32000000000000006 in IEEE-754.
-  const d = evaluateReservation({ spentUsd: 0.1, reservedUsd: 0.1, capUsd: 0.32 }, 0.12);
+  // 0.1 + 0.2 is 0.30000000000000004 in IEEE-754 — 5.55e-17 OVER a 0.3 cap. The tolerance is what
+  // admits it. (An earlier version used 0.1 + 0.1 + 0.12, whose comment claimed drift; that sum is
+  // exactly 0.32, so the tolerance was never exercised and a mutation removing it survived.)
+  assert.ok(0.1 + 0.2 > 0.3, "precondition: this input really does drift over the cap");
+  const d = evaluateReservation({ spentUsd: 0.1, reservedUsd: 0, capUsd: 0.3 }, 0.2);
   assert.equal(d.allowed, true);
 });
 

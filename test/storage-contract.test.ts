@@ -86,10 +86,12 @@ test("concurrent holds are refused once they would oversubscribe the cap, before
 });
 
 test("a hold that lands exactly on the cap is admitted despite floating-point drift", () => {
+  // 0.1 + 0.2 sums to 0.30000000000000004 in SQLite's REAL arithmetic, just OVER a 0.3 cap; the
+  // `+ 1e-9` in the reserve statement is what admits it. (0.1 + 0.1 + 0.12 sums to exactly 0.32, so
+  // an earlier version of this test never exercised the tolerance.)
   const db = fresh();
-  assert.equal(reserve(db, "a", 0.1), true);
-  assert.equal(reserve(db, "b", 0.1), true);
-  assert.equal(reserve(db, "c", 0.12), true);
+  assert.equal(reserve(db, "a", 0.1, NOW, 0.3), true);
+  assert.equal(reserve(db, "b", 0.2, NOW, 0.3), true);
 });
 
 test("the sticky kill switch refuses a reservation even with headroom", () => {
@@ -209,3 +211,72 @@ test("any interleaving of reserve and settle keeps spend + open holds under the 
     }
   }
 });
+
+// ── QA edge cases (2026-09-24) ──────────────────────────────────────────────
+// Each of these was added because a deliberate bug in the SQL survived the suite above
+// (scripts/mutation-check.mjs), or because the behaviour was undocumented.
+
+function reserveOn(db: DatabaseSync, day: string, id: string, holdUsd: number, cap = CAP): boolean {
+  const [, inserted] = batch(db, [
+    [SQL.ensureWindow, [day, cap]],
+    [SQL.reserve, [id, day, holdUsd, NOW + TTL]],
+  ]);
+  return inserted === 1;
+}
+
+test("holds in one window never count against another window's cap", () => {
+  // Killed mutant S3: without the date filter, yesterday's open hold blocks today's first call.
+  const db = fresh();
+  assert.equal(reserveOn(db, "2026-09-18", "yesterday", 0.3), true);
+  assert.equal(reserveOn(db, "2026-09-19", "today", 0.3), true, "a fresh window must start with full headroom");
+});
+
+test("a hold expires at exactly its expiry instant, not one tick after", () => {
+  // Killed mutant S6: with `<` instead of `<=`, a hold at its expiry instant is neither live nor charged.
+  const db = fresh();
+  reserve(db, "edge", 0.1, NOW);
+  const exactly = NOW + TTL;
+  batch(db, [
+    [SQL.expireAccrue, [exactly]],
+    [SQL.expireMark, [exactly]],
+  ]);
+  assert.ok(Math.abs(windowRow(db).total_spend_usd - 0.1) < 1e-12);
+  assert.equal(openHolds(db), 0);
+});
+
+test("a retried reserve with the same id throws and leaves exactly one hold", () => {
+  // Undocumented: reserve is NOT idempotent. A retry does not double-count — it fails loudly —
+  // so a caller that retries must catch the constraint error rather than assume success.
+  const db = fresh();
+  assert.equal(reserve(db, "dup", 0.1), true);
+  assert.throws(() => reserve(db, "dup", 0.1));
+  assert.ok(Math.abs(openHolds(db) - 0.1) < 1e-12, "the failed retry must not add a second hold");
+});
+
+test("settling an id that was never reserved is a no-op, not an error", () => {
+  const db = fresh();
+  reserve(db, "real", 0.1);
+  assert.doesNotThrow(() => settle(db, "ghost", 0.05));
+  assert.equal(windowRow(db).total_spend_usd, 0);
+  assert.equal(windowRow(db).call_count, 0);
+});
+
+test("a negative hold is rejected by the schema, not silently buying headroom", () => {
+  const db = fresh();
+  assert.throws(() => reserve(db, "neg", -0.5));
+  assert.equal(openHolds(db), 0);
+});
+
+test(
+  "spending exactly the cap in small calls trips the sticky switch",
+  { todo: "DEFECT-7 (medium): ten $0.10 settles sum to 0.9999999999999999, so the `>= hard_cap_usd` trip never fires at the default $1.00 cap" },
+  () => {
+    const db = fresh();
+    for (let i = 0; i < 10; i++) {
+      assert.equal(reserve(db, `c${i}`, 0.1, NOW, 1), true);
+      settle(db, `c${i}`, 0.1);
+    }
+    // $1.00 has been spent against a $1.00 cap. The switch must be set.
+    assert.equal(windowRow(db).kill_switch_hit, 1, `spent ${windowRow(db).total_spend_usd} of 1.00`);
+  },
+);

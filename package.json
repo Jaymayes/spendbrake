@@ -20,7 +20,8 @@
   "scripts": {
     "build": "tsc",
     "test": "node --test \"test/*.test.ts\"",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "test:mutation": "node scripts/mutation-check.mjs"
   },
   "keywords": [
     "ai",

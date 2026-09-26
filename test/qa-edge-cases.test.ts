@@ -160,9 +160,9 @@ test("content that is ONLY a hidden comment is empty to the reader", () => {
   assert.equal(checkDisclosures("<!-- #ad #AIGenerated -->", { ...AD, ...AI }).reason, "empty_content");
 });
 
+// Fixed DEFECT-4: a string was iterated per character, so almost any text satisfied it.
 test(
   "requireLiterals given a string (not an array) still requires the whole phrase",
-  { todo: "DEFECT-4 (low): a string is iterated per CHARACTER, so text containing every letter passes without the phrase" },
   () => {
     const rules = { requireLiterals: "Results may vary" as unknown as string[] };
     // Contains every character of the phrase, but not the phrase.
@@ -285,13 +285,35 @@ test("an empty model name is priced like any unknown model, not as free", () => 
   assert.ok(estimateCostUsd(undefined as unknown as string, 1000) > 0);
 });
 
+// Fixed DEFECT-12: a negative caller-supplied rate returned a negative cost, which an accrual subtracts.
 test(
   "a negative price never produces a negative cost",
-  { todo: "DEFECT-12 (low): a caller-supplied table with a negative rate returns a negative cost, which an unguarded accrual would SUBTRACT" },
   () => {
     assert.ok(estimateCostUsd("custom", 1000, { custom: -1 }) >= 0);
   },
 );
+
+test("an unusable rate is unknown (Infinity); an explicit $0 rate is honoured as free", () => {
+  // kills B13/B14: the DEFECT-12 guard must reject bad rates without over-rejecting a real zero.
+  assert.equal(estimateCostUsd("custom", 1000, { custom: -1 }), Number.POSITIVE_INFINITY);
+  assert.equal(estimateCostUsd("custom", 1000, { custom: Number.NaN }), Number.POSITIVE_INFINITY);
+  assert.equal(estimateCostUsd("custom", 1000, { custom: "x" as unknown as number }), Number.POSITIVE_INFINITY);
+  assert.equal(estimateCostUsd("custom", 1000, { custom: 0 }), 0);
+});
+
+test("a negative prompt size is corrupt too, not a discount on the hold", () => {
+  // kills R11: clamping -500 to 0 (the old behaviour) would reserve less than the real worst case.
+  assert.equal(estimateMaxCostUsd("llama-3.3-70b", -500, 1000), Number.POSITIVE_INFINITY);
+  assert.equal(estimateMaxCostUsd("llama-3.3-70b", undefined as unknown as number, 1000), Number.POSITIVE_INFINITY);
+});
+
+test("a requireLiterals that is neither a list nor a string blocks instead of being dropped", () => {
+  // kills D22: a misconfigured rule must not silently remove the requirement.
+  const d = checkDisclosures("Any text at all.", { requireLiterals: 42 as unknown as string[] });
+  assert.equal(d.allowed, false);
+  // And the string form requires the whole phrase, passing when it is present.
+  assert.equal(checkDisclosures("Results may vary.", { requireLiterals: "Results may vary" as unknown as string[] }).allowed, true);
+});
 
 // ── reservation gate ────────────────────────────────────────────────────────
 
@@ -318,9 +340,9 @@ test("corrupt (NaN) outstanding holds do not read as zero holds", () => {
   assert.equal(s.reason, "invalid_state");
 });
 
+// Fixed DEFECT-13: NaN prompt tokens were priced as zero, so the hold under-reserved silently.
 test(
   "an unreadable prompt size cannot be bounded, so it cannot be reserved",
-  { todo: "DEFECT-13 (low): NaN promptTokens is priced as 0 prompt tokens and silently UNDER-reserves, while a bad maxOutputTokens correctly returns Infinity" },
   () => {
     assert.equal(estimateMaxCostUsd("llama-3.3-70b", Number.NaN, 1000), Number.POSITIVE_INFINITY);
   },
@@ -328,9 +350,9 @@ test(
 
 // ── loop breaker ────────────────────────────────────────────────────────────
 
+// Fixed DEFECT-14: a negative counter was clamped to 0 and allowed, handing a runaway loop a fresh budget.
 test(
   "a negative iteration counter is corrupt and fails closed",
-  { todo: "DEFECT-14 (low): iteration = -5 is clamped to 0 and allowed; the file's own rule is that a corrupt counter must block" },
   () => {
     assert.equal(evaluateLoop({ iteration: -5, maxIterations: 10 }).allowed, false);
   },

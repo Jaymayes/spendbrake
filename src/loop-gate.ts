@@ -8,7 +8,7 @@
 //
 // Three independent brakes:
 //   1. max_iterations — a hard step count. Missing or non-positive limits fall back to the default,
-//      never to unlimited. A corrupt counter (NaN, infinite, missing) fails CLOSED: resetting a
+//      never to unlimited. A corrupt counter (NaN, infinite, missing, negative) fails CLOSED: resetting a
 //      runaway loop's counter to zero by accident is exactly the failure this exists to prevent.
 //   2. no_progress — the same action fingerprint repeated back to back N times. The caller chooses
 //      the fingerprint (e.g. `${tool}:${stableHash(args)}`); identical consecutive fingerprints mean
@@ -71,7 +71,9 @@ export function evaluateLoop(s: LoopState): LoopDecision {
   const repeatCount = trailingRepeats(s.recentActions);
 
   const raw = Number(s.iteration);
-  if (typeof s.iteration !== "number" || !Number.isFinite(raw)) {
+  // A negative step count cannot happen in a real run; clamping it to 0 would hand a corrupted
+  // runaway loop a fresh budget, so it blocks like NaN does.
+  if (typeof s.iteration !== "number" || !Number.isFinite(raw) || raw < 0) {
     return { allowed: false, reason: "max_iterations", iteration: maxIterations, maxIterations, repeatCount };
   }
   const iteration = Math.max(0, Math.floor(raw));

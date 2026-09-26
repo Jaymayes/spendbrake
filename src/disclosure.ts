@@ -113,7 +113,12 @@ export function checkDisclosures(
   if (rules.requireAd && !hasUnnegatedMarker(visible, AD_PATTERNS)) missing.push("ad");
   if (rules.requireAiGenerated && !hasUnnegatedMarker(visible, AI_PATTERNS)) missing.push("ai_generated");
 
-  for (const literal of rules.requireLiterals ?? []) {
+  // A single string is one required phrase. Iterating it directly would require each CHARACTER,
+  // which almost any text satisfies. Any other non-array value is a misconfiguration and is required
+  // as-is, so it blocks rather than silently dropping the requirement.
+  const raw: unknown = rules.requireLiterals;
+  const literals: unknown[] = Array.isArray(raw) ? raw : raw == null ? [] : [raw];
+  for (const literal of literals) {
     const needle = String(literal ?? "").trim();
     if (!needle) continue;
     if (!visible.toLowerCase().includes(needle.toLowerCase())) missing.push(needle);

@@ -118,7 +118,8 @@ package, JavaScript and SQL alike, uses a shared tolerance of a billionth of a d
 an allowance.
 
 **A cost that cannot be read is unbounded, not free.** `estimateCostUsd` returns `Infinity` when
-the token count is not a finite, non-negative number — a provider response with no usage, say.
+the token count is not a finite, non-negative number — a provider response with no usage, say —
+or when a caller-supplied rate is negative or not a number (a negative cost would be subtracted).
 The call ran and its cost is unknown, so it must not accrue as $0. Recording `Infinity` trips the
 cap; `examples/worker.ts` sets the kill switch directly instead, because D1 bindings travel as
 JSON, which cannot carry `Infinity`.
@@ -180,7 +181,8 @@ understanding — a negation four or more words back ("not in any way sponsored"
   dash does not count. Ordinary punctuation does: `#ad.`, `#ad,` and `(#ad)` all still pass.
 - The guard judges what a reader sees. **HTML comments are stripped first**, so `<!-- #ad -->` is
   not a disclosure, and an unterminated `<!--` hides everything after it. Required literals are
-  judged the same way. CSS-hidden text (`display:none`) is **not** detected — that needs rendering,
+  judged the same way. A `requireLiterals` given as a single string is one required phrase, not a
+  list of its characters. CSS-hidden text (`display:none`) is **not** detected — that needs rendering,
   which a deterministic text check does not do. Pass rendered text if your copy can hide content.
 
 ### 4. Retraction
@@ -211,7 +213,8 @@ const s = settleReservation({ reservedUsd, holdUsd: d.reserveUsd, actualUsd });
 
 Every way of not knowing the cost fails closed:
 
-- **No output limit, or a model with no price in the table** — there is no worst case, so
+- **No output limit, an unreadable prompt size, or a model with no price in the table** — there
+  is no worst case, so
   `estimateMaxCostUsd` returns `Infinity` and the gate refuses the call. It does not guess a rate,
   and it does not read "no price" as free. Price the worst case at the rate your provider will
   actually bill for that request, including long-context tiers.
@@ -249,7 +252,7 @@ evaluateLoop({ iteration: 6, recentActions: ["analyze:r1", "verify:r1", "analyze
 ```
 
 You choose the action fingerprint, for example `${tool}:${hash(args)}`. A missing or non-positive
-limit falls back to 25, never to unlimited. A corrupt counter (`NaN`, missing) blocks rather than
+limit falls back to 25, never to unlimited. A corrupt counter (`NaN`, missing, negative) blocks rather than
 reading as zero, because resetting a runaway loop's counter by accident is the failure this exists
 to prevent.
 

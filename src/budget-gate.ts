@@ -93,6 +93,10 @@ export function readUsd(x: unknown): number {
  * accrue as free. This is the same posture `estimateMaxCostUsd` takes for an unbounded output.
  * Recording `Infinity` trips the cap; if your store cannot hold it, set the kill switch directly
  * (see `budgetAccrue` in examples/worker.ts). A zero-cost model costs nothing whatever the count.
+ *
+ * A caller-supplied rate that is negative or not a finite number also returns `Infinity`. A negative
+ * cost would be SUBTRACTED by an accrual that adds it, lowering recorded spend. A rate of exactly 0 is
+ * an explicit "free" and is honoured.
  */
 export function estimateCostUsd(
   model: string,
@@ -108,7 +112,8 @@ export function estimateCostUsd(
   }
   if (tokens === 0) return 0;
   const key = Object.keys(prices).find((k) => m.includes(k));
-  const rate = key ? prices[key] : DEFAULT_RATE_PER_1K;
+  const rate = key ? Number(prices[key]) : DEFAULT_RATE_PER_1K;
+  if (!Number.isFinite(rate) || rate < 0) return Number.POSITIVE_INFINITY;
   return (tokens / 1000) * rate;
 }
 

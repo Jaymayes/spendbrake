@@ -93,8 +93,9 @@ export function evaluateReservation(s: ReservationState, estimateUsd: number): R
 /**
  * Worst-case cost of one call: every prompt token plus the full output allowance, priced with the
  * same table as the budget gate. Returns +Infinity — which evaluateReservation refuses — when the
- * output allowance is missing or invalid, or when the model has no usable price in the table. A call
- * you cannot bound is a call you cannot reserve. Zero-cost models (see budget-gate) return 0.
+ * prompt size or the output allowance is missing or invalid, or when the model has no usable price in
+ * the table. A call you cannot bound is a call you cannot reserve. (An unreadable prompt size used to
+ * be priced as zero tokens, which under-reserved silently.) Zero-cost models (see budget-gate) return 0.
  *
  * Price the worst case with the rate your provider will actually bill for this request, including
  * long-context tiers. A table that prices a tiered request at the base rate under-reserves it.
@@ -111,7 +112,10 @@ export function estimateMaxCostUsd(
   }
   const rate = lookupRatePer1K(model, prices);
   if (rate === undefined) return Number.POSITIVE_INFINITY;
-  const prompt = Math.max(0, Number(promptTokens) || 0);
+  const prompt = Number(promptTokens);
+  if (typeof promptTokens !== "number" || !Number.isFinite(prompt) || prompt < 0) {
+    return Number.POSITIVE_INFINITY;
+  }
   return ((prompt + out) / 1000) * rate;
 }
 

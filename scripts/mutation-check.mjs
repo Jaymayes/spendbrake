@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
-const COPY = ['src', 'test', 'schema.sql', 'package.json', 'tsconfig.json'];
+const COPY = ['src', 'test', 'skills', 'schema.sql', 'package.json', 'tsconfig.json'];
 
 // Each mutant: one realistic bug in one guard. `find` must match exactly once unless `all` is set,
 // which the runner enforces — a mutation that silently fails to apply would report a false KILL.
@@ -207,6 +207,28 @@ const MUTANTS = [
     find: 'expires_at_ms <= ?1', replace: 'expires_at_ms < ?1', all: true },
   { id: 'S7', file: 'src/reservation-sql.ts', what: 'float tolerance removed from reserve admission',
     find: '<= w.hard_cap_usd + 1e-9', replace: '<= w.hard_cap_usd' },
+
+  // ── agent-safety-rails skill ─────────────────────────────────────────────
+  { id: 'K1', file: 'skills/agent-safety-rails/scripts/lib/locks.mjs', what: 'an expired lock is free to anyone (no ask first)',
+    find: '  if (!req.takeExpired) {', replace: '  if (false) {' },
+  { id: 'K2', file: 'skills/agent-safety-rails/scripts/lib/locks.mjs', what: 'a peer can unlock someone else\'s lock',
+    find: "if (!owner || existing.owner !== owner) return { action: 'refuse'", replace: "if (!owner) return { action: 'refuse'" },
+  { id: 'K3', file: 'skills/agent-safety-rails/scripts/lib/lock-store.mjs', what: 'lock creation is not atomic (racing sessions both win)',
+    find: "writeLock(path, d.lock, d.action === 'create');", replace: 'writeLock(path, d.lock, false);' },
+  { id: 'K4', file: 'skills/agent-safety-rails/scripts/lib/locks.mjs', what: 'an unreadable lock file reads as free',
+    find: "  return { owner: 'unknown',", replace: "  return null; return { owner: 'unknown'," },
+  { id: 'D1', file: 'skills/agent-safety-rails/scripts/lib/deploy-clean.mjs', what: 'CI env var alone is trusted as pushed',
+    find: 'const pushedByCi = githubActions && !!head && head === githubSha;', replace: 'const pushedByCi = githubActions;' },
+  { id: 'D2', file: 'skills/agent-safety-rails/scripts/check-deploy-clean.mjs', what: 'untracked files ignored',
+    find: "'--untracked-files=all'", replace: "'--untracked-files=no'" },
+  { id: 'X1', file: 'skills/agent-safety-rails/hooks/exfil-guard.mjs', what: 'first-party match is a suffix, so look-alike hosts pass',
+    find: "new RegExp(`^(?:${FIRST_PARTY_HOSTS.join('|')})$`, 'i')", replace: "new RegExp(`(?:${FIRST_PARTY_HOSTS.join('|')})`, 'i')" },
+  { id: 'X2', file: 'skills/agent-safety-rails/hooks/exfil-guard.mjs', what: 'a command with no visible URL is let through',
+    find: 'if (hosts.length && hosts.every((h) => FIRST_PARTY.test(h))) return null;', replace: 'if (hosts.every((h) => FIRST_PARTY.test(h))) return null;' },
+  { id: 'W1', file: 'skills/agent-safety-rails/scripts/lib/worktree-audit.mjs', what: 'unpushed worktrees become removable',
+    find: "  if (!facts.pushed) return { state: 'KEEP'", replace: "  if (false) return { state: 'KEEP'" },
+  { id: 'W2', file: 'skills/agent-safety-rails/scripts/lib/worktree-audit.mjs', what: 'hook references match without a path boundary',
+    find: "+ '(?=[/\"\\'\\\\s]|$)'", replace: "+ ''" },
 ];
 
 // ── runner ────────────────────────────────────────────────────────────────

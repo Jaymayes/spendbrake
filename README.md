@@ -5,7 +5,7 @@ Gates for running LLM agents in production without hoping they behave.
 > Formerly `agent-control-plane`. Old links redirect here.
 
 The first four gates were extracted from a governed autonomous content system that has been
-running on Cloudflare Workers since 2025; the reservation and loop gates are newer (see
+running on Cloudflare Workers since early 2026; the reservation and loop gates are newer (see
 [Status](#status)). Every gate here is enforcement, not telemetry — each one has an
 `allowed: false` path that stops the thing from happening.
 

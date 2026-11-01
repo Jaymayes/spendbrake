@@ -332,6 +332,30 @@ settles puts spend plus open holds over the cap.
 
 ---
 
+## Agent safety rails (a Claude Code skill)
+
+The gates above govern what an agent does at runtime. [`skills/agent-safety-rails`](skills/agent-safety-rails/SKILL.md)
+governs the coding agents that build and run the system. These are several Claude Code sessions working one
+repository in parallel. Four dependency-free scripts:
+
+| Rail | Stops |
+|---|---|
+| `scripts/lock.mjs` | Two sessions deploying, merging or migrating the same thing at once (atomic lock files, owner-only unlock, an expired lock is still not free) |
+| `scripts/check-deploy-clean.mjs` | A deploy that bundles uncommitted or unpushed code |
+| `scripts/worktree-audit.mjs` | Deleting a worktree that holds unpushed work or that a hook runs from (read-only; suggests, never removes) |
+| `hooks/exfil-guard.mjs` | A hijacked session sending a secret out, installing a named package, or editing its own settings (a PreToolUse hook that answers "ask", never "allow") |
+
+Install it by copying the folder into `~/.claude/skills/` (or a project's `.claude/skills/`). The exfil guard is a
+hook, so **you** install it, not the agent; [`references/exfil-guard.md`](skills/agent-safety-rails/references/exfil-guard.md)
+has the steps.
+
+Status, the same honest distinction as above: the deploy-clean gate, the worktree audit and the exfil guard run in
+the source system; these are generalized copies. There, the lock protocol is a written convention between sessions.
+`lock.mjs` turns it into a tool and is new. The tests run every script against real git repositories and a real lock
+directory (including a session losing the race for a lock between its read and its write), and `npm run test:mutation` covers the rails too.
+
+---
+
 ## What this is not
 
 - Not a prompt firewall, jailbreak filter, or content classifier.

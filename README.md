@@ -2,7 +2,8 @@
 
 Gates for running LLM agents in production without hoping they behave.
 
-> Formerly `agent-control-plane`. Old links redirect here.
+> Formerly `agent-control-plane`. Old links redirect here. Not related to `spend-brake` (spendbrake.dev), a
+> separate egress proxy for API spend caps.
 
 The first four gates were extracted from a governed autonomous content system that has been
 running on Cloudflare Workers since early 2026; the reservation and loop gates are newer (see
@@ -16,7 +17,17 @@ MIT licensed. No dependencies. Works on Workers, Node, Deno, or Bun.
 Not on npm yet. Install straight from GitHub — npm builds it on install:
 
 ```sh
-npm install github:Jaymayes/spendbrake
+npm install github:Jaymayes/spendbrake#v0.1.0
+```
+
+Then watch it block (save as `try.mjs` in an ESM project, run `node try.mjs`):
+
+```js
+import { evaluateBudget } from "spendbrake";
+console.log(evaluateBudget({ spentUsd: 0.30, capUsd: 0.32, killSwitchHit: false }));
+// → { allowed: true, reason: 'ok', spentUsd: 0.3, capUsd: 0.32 }
+console.log(evaluateBudget({ spentUsd: 0.33, capUsd: 0.32, killSwitchHit: false }));
+// → { allowed: false, reason: 'cap_exceeded', spentUsd: 0.33, capUsd: 0.32 }
 ```
 
 npm 11 may warn that `spendbrake (prepare: npm run build)` is "not yet covered by allowScripts".
